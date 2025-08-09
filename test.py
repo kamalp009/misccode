@@ -3,10 +3,10 @@ import re
 from collections import Counter
 import os
 
-def analyze_specific_issue_type(excel_file_path, text_file_path, target_issue_types, output_file_path):
+def analyze_issue_type_word_frequency(excel_file_path, output_excel_path, min_word_length=3, min_count=2):
     """
-    Find matches between Excel short_description words and text file content
-    for specific issue types only
+    Analyze word frequency within each issue type's combined short descriptions
+    and create a new Excel file with issue_type, word, and count columns
     """
     
     try:
@@ -19,222 +19,287 @@ def analyze_specific_issue_type(excel_file_path, text_file_path, target_issue_ty
             print("❌ Error: Excel file must contain 'short_description' and 'issue_type' columns")
             return None
         
-        # Filter DataFrame for specific issue types
-        if isinstance(target_issue_types, str):
-            target_issue_types = [target_issue_types]
+        # Remove rows with null values in required columns
+        df_clean = df.dropna(subset=['short_description', 'issue_type'])
+        print(f"📝 Processing {len(df_clean)} records with valid data")
         
-        filtered_df = df[df['issue_type'].isin(target_issue_types)]
-        print(f"🎯 Filtered to {len(filtered_df)} records for issue types: {', '.join(target_issue_types)}")
+        # Get unique issue types
+        unique_issue_types = df_clean['issue_type'].unique()
+        print(f"🎯 Found {len(unique_issue_types)} unique issue types")
         
-        if filtered_df.empty:
-            print("❌ No records found for the specified issue types!")
+        # Results list to store word frequency data
+        results_data = []
+        issue_type_stats = {}
+        
+        # Process each issue type
+        for issue_type in unique_issue_types:
+            print(f"\n🔍 Processing issue type: {issue_type}")
+            
+            # Filter data for current issue type
+            issue_df = df_clean[df_clean['issue_type'] == issue_type]
+            
+            # Combine all short descriptions for this issue type
+            combined_descriptions = ""
+            for desc in issue_df['short_description']:
+                combined_descriptions += " " + str(desc).lower()
+            
+            # Extract words from combined descriptions
+            words = re.findall(r'\b[a-zA-Z0-9]+\b', combined_descriptions)
+            
+            # Filter words by minimum length
+            filtered_words = [word for word in words if len(word) >= min_word_length]
+            
+            # Count word frequencies
+            word_counts = Counter(filtered_words)
+            
+            # Filter by minimum count
+            significant_words = {word: count for word, count in word_counts.items() if count >= min_count}
+            
+            # Store statistics
+            issue_type_stats[issue_type] = {
+                'total_descriptions': len(issue_df),
+                'total_words': len(filtered_words),
+                'unique_words': len(word_counts),
+                'significant_words': len(significant_words)
+            }
+            
+            # Add to results
+            for word, count in significant_words.items():
+                results_data.append({
+                    'issue_type': issue_type,
+                    'word': word,
+                    'count': count,
+                    'total_descriptions_in_type': len(issue_df),
+                    'word_frequency_percentage': round((count / len(filtered_words)) * 100, 2)
+                })
+            
+            print(f"   📄 Descriptions: {len(issue_df)}")
+            print(f"   📝 Total words: {len(filtered_words)}")
+            print(f"   🔤 Unique words: {len(word_counts)}")
+            print(f"   ⭐ Significant words (≥{min_count}): {len(significant_words)}")
+        
+        # Create DataFrame from results
+        results_df = pd.DataFrame(results_data)
+        
+        if results_df.empty:
+            print("❌ No data generated. Try reducing min_word_length or min_count parameters.")
             return None
         
-        # Read text file
-        print("📄 Reading text file...")
-        with open(text_file_path, 'r', encoding='utf-8') as file:
-            text_content = file.read().lower()
+        # Sort by issue_type and count (descending)
+        results_df = results_df.sort_values(['issue_type', 'count'], ascending=[True, False])
         
-        # Extract words from filtered short_description column
-        print("🔍 Extracting words from filtered short descriptions...")
-        all_description_words = []
-        word_to_issue_type = {}
+        # Create summary statistics sheet
+        summary_data = []
+        for issue_type, stats in issue_type_stats.items():
+            summary_data.append({
+                'issue_type': issue_type,
+                'total_descriptions': stats['total_descriptions'],
+                'total_words_analyzed': stats['total_words'],
+                'unique_words_found': stats['unique_words'],
+                'significant_words': stats['significant_words']
+            })
         
-        for index, row in filtered_df.iterrows():
-            if pd.notna(row['short_description']):
-                description = str(row['short_description']).lower()
-                issue_type = str(row['issue_type'])
-                
-                # Extract words (remove special characters, keep only alphanumeric)
-                words = re.findall(r'\b[a-zA-Z0-9]+\b', description)
-                
-                for word in words:
-                    if len(word) > 2:  # Only consider words with more than 2 characters
-                        all_description_words.append(word)
-                        
-                        # Track issue types for this word
-                        if word not in word_to_issue_type:
-                            word_to_issue_type[word] = set()
-                        word_to_issue_type[word].add(issue_type)
+        summary_df = pd.DataFrame(summary_data)
+        summary_df = summary_df.sort_values('total_descriptions', ascending=False)
         
-        print(f"📝 Found {len(set(all_description_words))} unique words in filtered descriptions")
-        
-        # Count occurrences of each word in text file
-        print("🔎 Searching for word matches in text file...")
-        word_matches = {}
-        
-        for word in set(all_description_words):
-            # Count how many times this word appears in the text file
-            pattern = r'\b' + re.escape(word) + r'\b'
-            matches = len(re.findall(pattern, text_content, re.IGNORECASE))
+        # Write to Excel with multiple sheets
+        with pd.ExcelWriter(output_excel_path, engine='openpyxl') as writer:
+            # Main results sheet
+            results_df.to_excel(writer, sheet_name='Word_Frequency_Analysis', index=False)
             
-            if matches > 0:
-                word_matches[word] = {
-                    'count_in_text': matches,
-                    'count_in_descriptions': all_description_words.count(word),
-                    'issue_types': list(word_to_issue_type[word])
-                }
+            # Summary statistics sheet
+            summary_df.to_excel(writer, sheet_name='Summary_Statistics', index=False)
+            
+            # Top words per issue type sheet
+            create_top_words_sheet(results_df, writer)
         
-        # Sort by count in text file and get top 40
-        sorted_matches = sorted(word_matches.items(), key=lambda x: x[1]['count_in_text'], reverse=True)
-        top_40_matches = sorted_matches[:40]
+        print(f"\n✅ Analysis complete!")
+        print(f"📊 Total records processed: {len(results_data)}")
+        print(f"💾 Results saved to: {output_excel_path}")
         
-        # Generate results
-        results = {
-            'target_issue_types': target_issue_types,
-            'filtered_records': len(filtered_df),
-            'total_unique_words': len(set(all_description_words)),
-            'words_found_in_text': len(word_matches),
-            'top_40_matches': top_40_matches
-        }
+        # Print quick summary
+        print(f"\n📈 QUICK SUMMARY:")
+        for issue_type, stats in issue_type_stats.items():
+            print(f"  {issue_type}: {stats['significant_words']} significant words from {stats['total_descriptions']} descriptions")
         
-        # Write results to file
-        write_specific_results_to_file(results, output_file_path, excel_file_path, text_file_path)
+        return results_df, summary_df
         
-        print(f"✅ Analysis complete for issue types: {', '.join(target_issue_types)}")
-        print(f"📊 {len(word_matches)} words found in text file")
-        print(f"💾 Results saved to: {output_file_path}")
-        
-        return results
-        
-    except FileNotFoundError as e:
-        print(f"❌ Error: File not found - {str(e)}")
+    except FileNotFoundError:
+        print(f"❌ Error: Excel file '{excel_file_path}' not found!")
     except Exception as e:
         print(f"❌ Error: {str(e)}")
 
-def write_specific_results_to_file(results, output_file, excel_file, text_file):
-    """Write analysis results for specific issue types to output file"""
+def create_top_words_sheet(results_df, writer):
+    """Create a sheet showing top words for each issue type"""
     
-    with open(output_file, 'w', encoding='utf-8') as file:
-        file.write("="*80 + "\n")
-        file.write("    SPECIFIC ISSUE TYPE - EXCEL WORDS vs TEXT FILE ANALYSIS\n")
-        file.write("="*80 + "\n\n")
+    top_words_data = []
+    
+    for issue_type in results_df['issue_type'].unique():
+        issue_data = results_df[results_df['issue_type'] == issue_type].head(20)  # Top 20 words
         
-        file.write(f"📊 ANALYSIS SUMMARY:\n")
-        file.write(f"Excel file: {excel_file}\n")
-        file.write(f"Text file: {text_file}\n")
-        file.write(f"Target issue types: {', '.join(results['target_issue_types'])}\n")
-        file.write(f"Filtered records: {results['filtered_records']}\n")
-        file.write(f"Total unique words in descriptions: {results['total_unique_words']}\n")
-        file.write(f"Words found in text file: {results['words_found_in_text']}\n\n")
-        
-        file.write("🏆 TOP 40 MATCHING WORDS WITH COUNTS:\n")
-        file.write("="*80 + "\n")
-        file.write(f"{'Rank':<6} {'Word':<20} {'Text Count':<12} {'Desc Count':<12} {'Issue Types'}\n")
-        file.write("-"*80 + "\n")
-        
-        for rank, (word, data) in enumerate(results['top_40_matches'], 1):
-            issue_types_str = ', '.join(data['issue_types'])
-            
-            file.write(f"{rank:<6} {word:<20} {data['count_in_text']:<12} {data['count_in_descriptions']:<12} {issue_types_str}\n")
+        for rank, (_, row) in enumerate(issue_data.iterrows(), 1):
+            top_words_data.append({
+                'issue_type': issue_type,
+                'rank': rank,
+                'word': row['word'],
+                'count': row['count'],
+                'frequency_percentage': row['word_frequency_percentage']
+            })
+    
+    top_words_df = pd.DataFrame(top_words_data)
+    top_words_df.to_excel(writer, sheet_name='Top_Words_Per_Type', index=False)
 
-def get_available_issue_types(excel_file_path):
-    """Get list of all available issue types in the Excel file"""
+def create_detailed_analysis(excel_file_path, output_folder):
+    """Create separate analysis files for advanced insights"""
     
     try:
         df = pd.read_excel(excel_file_path)
-        if 'issue_type' in df.columns:
-            unique_issue_types = df['issue_type'].dropna().unique().tolist()
-            return sorted(unique_issue_types)
-        else:
-            print("❌ 'issue_type' column not found in Excel file")
-            return []
+        df_clean = df.dropna(subset=['short_description', 'issue_type'])
+        
+        # Create output folder if it doesn't exist
+        os.makedirs(output_folder, exist_ok=True)
+        
+        # Analysis 1: Word length distribution
+        word_length_analysis = []
+        
+        for issue_type in df_clean['issue_type'].unique():
+            issue_df = df_clean[df_clean['issue_type'] == issue_type]
+            combined_text = " ".join(issue_df['short_description'].astype(str))
+            words = re.findall(r'\b[a-zA-Z0-9]+\b', combined_text.lower())
+            
+            length_counts = Counter(len(word) for word in words)
+            
+            for length, count in length_counts.items():
+                word_length_analysis.append({
+                    'issue_type': issue_type,
+                    'word_length': length,
+                    'count': count
+                })
+        
+        length_df = pd.DataFrame(word_length_analysis)
+        length_df.to_excel(f"{output_folder}/word_length_analysis.xlsx", index=False)
+        
+        # Analysis 2: Common words across issue types
+        all_words = {}
+        
+        for issue_type in df_clean['issue_type'].unique():
+            issue_df = df_clean[df_clean['issue_type'] == issue_type]
+            combined_text = " ".join(issue_df['short_description'].astype(str))
+            words = re.findall(r'\b[a-zA-Z0-9]+\b', combined_text.lower())
+            word_counts = Counter(words)
+            
+            for word, count in word_counts.items():
+                if len(word) >= 3:
+                    if word not in all_words:
+                        all_words[word] = {}
+                    all_words[word][issue_type] = count
+        
+        # Find words that appear in multiple issue types
+        common_words_data = []
+        for word, issue_counts in all_words.items():
+            if len(issue_counts) > 1:  # Word appears in multiple issue types
+                total_count = sum(issue_counts.values())
+                issue_types_list = list(issue_counts.keys())
+                
+                common_words_data.append({
+                    'word': word,
+                    'appears_in_types': len(issue_counts),
+                    'total_count': total_count,
+                    'issue_types': '; '.join(issue_types_list),
+                    'individual_counts': '; '.join([f"{k}:{v}" for k, v in issue_counts.items()])
+                })
+        
+        common_df = pd.DataFrame(common_words_data)
+        common_df = common_df.sort_values('total_count', ascending=False)
+        common_df.to_excel(f"{output_folder}/common_words_analysis.xlsx", index=False)
+        
+        print(f"📁 Additional analysis files saved to: {output_folder}/")
+        
     except Exception as e:
-        print(f"❌ Error reading Excel file: {str(e)}")
-        return []
+        print(f"❌ Error in detailed analysis: {str(e)}")
 
-def interactive_issue_type_selection(excel_file_path):
-    """Allow user to interactively select issue types"""
+def generate_word_cloud_data(results_df, output_csv_path):
+    """Generate data suitable for word cloud visualization"""
     
-    available_types = get_available_issue_types(excel_file_path)
-    
-    if not available_types:
-        return []
-    
-    print("\n📋 Available Issue Types:")
-    print("=" * 40)
-    for i, issue_type in enumerate(available_types, 1):
-        print(f"{i:2d}. {issue_type}")
-    
-    print("\n🎯 Selection Options:")
-    print("- Enter numbers separated by commas (e.g., 1,3,5)")
-    print("- Enter 'all' to select all types")
-    print("- Enter issue type names directly (e.g., Network,System)")
-    
-    selection = input("\nEnter your selection: ").strip()
-    
-    if selection.lower() == 'all':
-        return available_types
-    
-    selected_types = []
-    
-    # Try to parse as numbers
     try:
-        numbers = [int(x.strip()) for x in selection.split(',')]
-        for num in numbers:
-            if 1 <= num <= len(available_types):
-                selected_types.append(available_types[num - 1])
-            else:
-                print(f"⚠️ Warning: Invalid selection {num}")
-    except ValueError:
-        # Try to parse as issue type names
-        type_names = [x.strip() for x in selection.split(',')]
-        for name in type_names:
-            matching_types = [t for t in available_types if name.lower() in t.lower()]
-            if matching_types:
-                selected_types.extend(matching_types)
-            else:
-                print(f"⚠️ Warning: No match found for '{name}'")
-    
-    return list(set(selected_types))  # Remove duplicates
+        # Create word cloud data for each issue type
+        wordcloud_data = []
+        
+        for issue_type in results_df['issue_type'].unique():
+            issue_data = results_df[results_df['issue_type'] == issue_type]
+            
+            # Get top 50 words for this issue type
+            top_words = issue_data.head(50)
+            
+            for _, row in top_words.iterrows():
+                wordcloud_data.append({
+                    'issue_type': issue_type,
+                    'word': row['word'],
+                    'count': row['count'],
+                    'size_weight': min(100, row['count'] * 2)  # Weight for word cloud sizing
+                })
+        
+        wordcloud_df = pd.DataFrame(wordcloud_data)
+        wordcloud_df.to_csv(output_csv_path, index=False)
+        print(f"☁️ Word cloud data saved to: {output_csv_path}")
+        
+    except Exception as e:
+        print(f"❌ Error generating word cloud data: {str(e)}")
 
 # Main execution
 if __name__ == "__main__":
-    # File paths - UPDATE THESE TO YOUR ACTUAL FILE PATHS
+    # File paths - UPDATE THESE TO YOUR ACTUAL PATHS
     excel_file = "your_excel_file.xlsx"  # Change this to your Excel file path
-    text_file = "output_advanced_clean.txt"  # Or any text file you want to analyze
+    output_excel = "issue_type_word_frequency_analysis.xlsx"
+    output_folder = "detailed_analysis"
+    wordcloud_csv = "wordcloud_data.csv"
     
-    print("🚀 Starting Specific Issue Type Analysis...")
-    print("=" * 70)
+    print("🚀 Starting Issue Type Word Frequency Analysis...")
+    print("=" * 80)
     
-    # Check if files exist
+    # Check if input file exists
     if not os.path.exists(excel_file):
         print(f"❌ Error: Excel file '{excel_file}' not found!")
         print("Please update the 'excel_file' variable with the correct path.")
+        
+        # Show current directory files for reference
+        print(f"\n📁 Files in current directory:")
+        for file in os.listdir('.'):
+            if file.endswith(('.xlsx', '.xls')):
+                print(f"  - {file}")
         exit(1)
     
-    if not os.path.exists(text_file):
-        print(f"❌ Error: Text file '{text_file}' not found!")
-        print("Please update the 'text_file' variable with the correct path.")
-        exit(1)
+    # Parameters for analysis
+    MIN_WORD_LENGTH = 3  # Minimum word length to consider
+    MIN_COUNT = 2        # Minimum count for a word to be included
     
-    # Method 1: Specify issue types directly in code
-    # Uncomment and modify the line below to specify issue types directly:
-    # target_issue_types = ["Network", "System", "Application"]  # Specify your target issue types here
+    print(f"⚙️ Analysis parameters:")
+    print(f"   - Minimum word length: {MIN_WORD_LENGTH}")
+    print(f"   - Minimum word count: {MIN_COUNT}")
     
-    # Method 2: Interactive selection
-    target_issue_types = interactive_issue_type_selection(excel_file)
+    # Main analysis
+    results_df, summary_df = analyze_issue_type_word_frequency(
+        excel_file, 
+        output_excel, 
+        min_word_length=MIN_WORD_LENGTH, 
+        min_count=MIN_COUNT
+    )
     
-    if not target_issue_types:
-        print("❌ No issue types selected. Exiting...")
-        exit(1)
-    
-    print(f"\n✅ Selected issue types: {', '.join(target_issue_types)}")
-    
-    # Generate output filename based on selected types
-    safe_types = [t.replace(' ', '_').replace('/', '_') for t in target_issue_types]
-    output_file = f"analysis_{'_'.join(safe_types[:3])}.txt"  # Use first 3 types in filename
-    
-    # Run analysis
-    results = analyze_specific_issue_type(excel_file, text_file, target_issue_types, output_file)
-    
-    if results:
-        # Print summary
-        print("\n" + "=" * 70)
-        print("📈 QUICK SUMMARY:")
-        print(f"🎯 Issue types analyzed: {', '.join(target_issue_types)}")
-        print(f"📄 Records filtered: {results['filtered_records']}")
-        print(f"✅ Matching words found: {results['words_found_in_text']}")
-        if results['top_40_matches']:
-            print(f"🏆 Top word: '{results['top_40_matches'][0][0]}' with {results['top_40_matches'][0][1]['count_in_text']} matches")
-        print(f"\n🎉 Analysis complete! Results saved to: {output_file}")
+    if results_df is not None:
+        # Generate additional analysis files
+        print(f"\n🔬 Creating detailed analysis...")
+        create_detailed_analysis(excel_file, output_folder)
+        
+        # Generate word cloud data
+        print(f"\n☁️ Generating word cloud data...")
+        generate_word_cloud_data(results_df, wordcloud_csv)
+        
+        print("\n" + "=" * 80)
+        print("🎉 Analysis Complete!")
+        print(f"📊 Main results: {output_excel}")
+        print(f"📁 Detailed analysis: {output_folder}/")
+        print(f"☁️ Word cloud data: {wordcloud_csv}")
+        
+        # Show sample of results
+        print(f"\n📋 Sample Results:")
+        print(results_df.head(10).to_string(index=False))
