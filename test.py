@@ -1,170 +1,233 @@
 import re
-from collections import OrderedDict
+from collections import Counter, defaultdict
+import os
 
-def clean_and_extract_unique_data(input_file_path, output_file_path):
+def find_repeated_text_patterns(input_file_path, output_file_path, min_occurrences=2):
     """
-    Extract unique data from a text file by removing repeated words and duplicate lines
+    Find and extract repeated text patterns from the cleaned file
     """
     
     try:
-        # Read the input file
+        # Read the cleaned file
         with open(input_file_path, 'r', encoding='utf-8') as file:
             content = file.read()
         
-        # Split content into lines
         lines = content.split('\n')
+        lines = [line.strip() for line in lines if line.strip()]
         
-        # Method 1: Remove duplicate lines while preserving order
-        unique_lines = list(OrderedDict.fromkeys(lines))
+        # Dictionary to store different types of repeated patterns
+        repeated_patterns = {
+            'exact_lines': [],
+            'word_sequences': [],
+            'phrases': [],
+            'error_patterns': [],
+            'partial_matches': []
+        }
         
-        # Method 2: For each line, remove repeated words
-        processed_lines = []
+        print(f"📊 Analyzing {len(lines)} lines for repeated patterns...")
         
-        for line in unique_lines:
-            if line.strip():  # Skip empty lines
-                # Split line into words
-                words = line.split()
-                
-                # Remove repeated words while preserving order
-                unique_words = list(OrderedDict.fromkeys(words))
-                
-                # Join words back into a line
-                processed_line = ' '.join(unique_words)
-                processed_lines.append(processed_line)
+        # 1. Find exact repeated lines
+        line_counts = Counter(lines)
+        repeated_patterns['exact_lines'] = [
+            (line, count) for line, count in line_counts.items() 
+            if count >= min_occurrences
+        ]
         
-        # Write to output file
-        with open(output_file_path, 'w', encoding='utf-8') as file:
-            file.write('\n'.join(processed_lines))
+        # 2. Find repeated word sequences (2-5 words)
+        word_sequences = defaultdict(int)
+        for line in lines:
+            words = line.split()
+            for i in range(len(words)):
+                for seq_len in range(2, min(6, len(words) - i + 1)):
+                    sequence = ' '.join(words[i:i + seq_len])
+                    if len(sequence) > 10:  # Only consider meaningful sequences
+                        word_sequences[sequence] += 1
         
-        print(f"✅ Processing complete!")
-        print(f"📄 Original lines: {len(lines)}")
-        print(f"📄 Unique lines: {len(processed_lines)}")
-        print(f"💾 Output saved to: {output_file_path}")
+        repeated_patterns['word_sequences'] = [
+            (seq, count) for seq, count in word_sequences.items() 
+            if count >= min_occurrences
+        ]
         
-        return processed_lines
+        # 3. Find repeated phrases using regex patterns
+        phrase_patterns = [
+            r'APPID[^\s]+',
+            r'[A-Z_]+\[[^\]]+\]',
+            r'BUSINESS_TRANSACTION[^\s]*',
+            r'COLLECTION[^\s]*',
+            r'DETECTED[^.]*',
+            r'PROBLEM[^.]*',
+            r'ERROR[^.]*',
+            r'FAILED[^.]*'
+        ]
+        
+        phrase_counts = defaultdict(int)
+        for pattern in phrase_patterns:
+            matches = re.findall(pattern, content, re.IGNORECASE)
+            for match in matches:
+                phrase_counts[match.strip()] += 1
+        
+        repeated_patterns['phrases'] = [
+            (phrase, count) for phrase, count in phrase_counts.items() 
+            if count >= min_occurrences and len(phrase) > 5
+        ]
+        
+        # 4. Find error patterns specifically
+        error_keywords = ['ERROR', 'FAILED', 'PROBLEM', 'VIOLATION', 'DETECTED']
+        error_lines = []
+        for line in lines:
+            if any(keyword in line.upper() for keyword in error_keywords):
+                error_lines.append(line)
+        
+        error_counts = Counter(error_lines)
+        repeated_patterns['error_patterns'] = [
+            (error, count) for error, count in error_counts.items() 
+            if count >= min_occurrences
+        ]
+        
+        # 5. Find partial matches (similar lines with small differences)
+        partial_matches = defaultdict(list)
+        for i, line1 in enumerate(lines):
+            for j, line2 in enumerate(lines[i+1:], i+1):
+                similarity = calculate_similarity(line1, line2)
+                if 0.7 <= similarity < 1.0:  # 70-99% similar
+                    key = min(line1, line2)  # Use lexicographically smaller as key
+                    partial_matches[key].append((line1, line2, similarity))
+        
+        repeated_patterns['partial_matches'] = [
+            (key, matches) for key, matches in partial_matches.items() 
+            if len(matches) >= min_occurrences
+        ]
+        
+        # Write results to output file
+        write_repeated_patterns_to_file(repeated_patterns, output_file_path)
+        
+        print(f"✅ Repeated pattern analysis complete!")
+        print(f"💾 Results saved to: {output_file_path}")
+        
+        return repeated_patterns
         
     except FileNotFoundError:
         print(f"❌ Error: Input file '{input_file_path}' not found.")
     except Exception as e:
         print(f"❌ Error: {str(e)}")
 
-def extract_specific_patterns(input_file_path, output_file_path):
-    """
-    Extract specific patterns like error codes, timestamps, etc.
-    """
-    
-    try:
-        with open(input_file_path, 'r', encoding='utf-8') as file:
-            content = file.read()
-        
-        # Define patterns to extract
-        patterns = {
-            'error_codes': r'[A-Z_]+\[[^\]]+\]',
-            'timestamps': r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}',
-            'ip_addresses': r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b',
-            'application_names': r'APPID[^\s]+',
-            'transaction_types': r'BUSINESS_TRANSACTION|COLLECTION|ACCOUNTSEARCH',
-        }
-        
-        extracted_data = {}
-        
-        for pattern_name, pattern in patterns.items():
-            matches = re.findall(pattern, content)
-            # Remove duplicates while preserving order
-            unique_matches = list(OrderedDict.fromkeys(matches))
-            extracted_data[pattern_name] = unique_matches
-        
-        # Write extracted data to file
-        with open(output_file_path, 'w', encoding='utf-8') as file:
-            for pattern_name, matches in extracted_data.items():
-                file.write(f"\n=== {pattern_name.upper().replace('_', ' ')} ===\n")
-                for match in matches:
-                    file.write(f"{match}\n")
-        
-        print(f"✅ Pattern extraction complete!")
-        print(f"💾 Extracted data saved to: {output_file_path}")
-        
-        return extracted_data
-        
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
+def calculate_similarity(str1, str2):
+    """Calculate similarity ratio between two strings"""
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, str1, str2).ratio()
 
-def advanced_text_cleaning(input_file_path, output_file_path):
-    """
-    Advanced cleaning with multiple options
-    """
+def write_repeated_patterns_to_file(patterns, output_file):
+    """Write all repeated patterns to output file"""
     
-    try:
-        with open(input_file_path, 'r', encoding='utf-8') as file:
-            content = file.read()
+    with open(output_file, 'w', encoding='utf-8') as file:
+        file.write("="*80 + "\n")
+        file.write("           REPEATED TEXT PATTERNS ANALYSIS REPORT\n")
+        file.write("="*80 + "\n\n")
         
-        # Clean the text
-        lines = content.split('\n')
-        cleaned_lines = []
-        seen_lines = set()
+        # 1. Exact repeated lines
+        file.write("🔄 EXACT REPEATED LINES\n")
+        file.write("-" * 40 + "\n")
+        if patterns['exact_lines']:
+            for line, count in sorted(patterns['exact_lines'], key=lambda x: x[1], reverse=True):
+                file.write(f"Count: {count}\n")
+                file.write(f"Text: {line}\n")
+                file.write("-" * 40 + "\n")
+        else:
+            file.write("No exact repeated lines found.\n\n")
         
-        for line in lines:
-            # Skip empty lines
-            if not line.strip():
-                continue
-            
-            # Convert to lowercase for comparison (optional)
-            line_lower = line.lower().strip()
-            
-            # Skip if we've seen this line before
-            if line_lower in seen_lines:
-                continue
-            
-            seen_lines.add(line_lower)
-            
-            # Clean individual words in the line
-            words = line.split()
-            seen_words = set()
-            unique_words = []
-            
-            for word in words:
-                word_clean = word.lower()
-                if word_clean not in seen_words:
-                    seen_words.add(word_clean)
-                    unique_words.append(word)
-            
-            cleaned_line = ' '.join(unique_words)
-            cleaned_lines.append(cleaned_line)
+        # 2. Repeated word sequences
+        file.write("\n🔤 REPEATED WORD SEQUENCES\n")
+        file.write("-" * 40 + "\n")
+        if patterns['word_sequences']:
+            for sequence, count in sorted(patterns['word_sequences'], key=lambda x: x[1], reverse=True)[:20]:
+                file.write(f"Count: {count}\n")
+                file.write(f"Sequence: {sequence}\n")
+                file.write("-" * 40 + "\n")
+        else:
+            file.write("No repeated word sequences found.\n\n")
         
-        # Write cleaned content
-        with open(output_file_path, 'w', encoding='utf-8') as file:
-            file.write('\n'.join(cleaned_lines))
+        # 3. Repeated phrases
+        file.write("\n📝 REPEATED PHRASES/PATTERNS\n")
+        file.write("-" * 40 + "\n")
+        if patterns['phrases']:
+            for phrase, count in sorted(patterns['phrases'], key=lambda x: x[1], reverse=True):
+                file.write(f"Count: {count}\n")
+                file.write(f"Phrase: {phrase}\n")
+                file.write("-" * 40 + "\n")
+        else:
+            file.write("No repeated phrases found.\n\n")
         
-        print(f"✅ Advanced cleaning complete!")
-        print(f"📄 Original lines: {len(lines)}")
-        print(f"📄 Cleaned unique lines: {len(cleaned_lines)}")
-        print(f"💾 Output saved to: {output_file_path}")
+        # 4. Error patterns
+        file.write("\n⚠️ REPEATED ERROR PATTERNS\n")
+        file.write("-" * 40 + "\n")
+        if patterns['error_patterns']:
+            for error, count in sorted(patterns['error_patterns'], key=lambda x: x[1], reverse=True):
+                file.write(f"Count: {count}\n")
+                file.write(f"Error: {error}\n")
+                file.write("-" * 40 + "\n")
+        else:
+            file.write("No repeated error patterns found.\n\n")
         
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
+        # 5. Partial matches
+        file.write("\n🔍 SIMILAR LINES (Partial Matches)\n")
+        file.write("-" * 40 + "\n")
+        if patterns['partial_matches']:
+            for key, matches in list(patterns['partial_matches'].items())[:10]:
+                file.write(f"Similar group (showing first few):\n")
+                for line1, line2, similarity in matches[:3]:
+                    file.write(f"Similarity: {similarity:.2%}\n")
+                    file.write(f"Line 1: {line1}\n")
+                    file.write(f"Line 2: {line2}\n")
+                    file.write("-" * 20 + "\n")
+                file.write("-" * 40 + "\n")
+        else:
+            file.write("No similar lines found.\n\n")
+
+def create_summary_report(patterns, summary_file):
+    """Create a summary report with statistics"""
+    
+    with open(summary_file, 'w', encoding='utf-8') as file:
+        file.write("📊 REPEATED PATTERNS SUMMARY REPORT\n")
+        file.write("="*50 + "\n\n")
+        
+        file.write(f"🔄 Exact repeated lines: {len(patterns['exact_lines'])}\n")
+        file.write(f"🔤 Repeated word sequences: {len(patterns['word_sequences'])}\n")
+        file.write(f"📝 Repeated phrases: {len(patterns['phrases'])}\n")
+        file.write(f"⚠️ Repeated error patterns: {len(patterns['error_patterns'])}\n")
+        file.write(f"🔍 Similar line groups: {len(patterns['partial_matches'])}\n\n")
+        
+        # Top repeated items
+        if patterns['exact_lines']:
+            top_repeated = sorted(patterns['exact_lines'], key=lambda x: x[1], reverse=True)[:5]
+            file.write("🏆 TOP 5 MOST REPEATED LINES:\n")
+            for i, (line, count) in enumerate(top_repeated, 1):
+                file.write(f"{i}. ({count}x) {line[:100]}...\n")
 
 # Main execution
 if __name__ == "__main__":
     # File paths
-    input_file = "input.txt"  # Change this to your input file path
-    output_file_unique = "output_unique.txt"
-    output_file_patterns = "output_patterns.txt"
-    output_file_advanced = "output_advanced_clean.txt"
+    input_file = "output_advanced_clean.txt"  # Output from previous script
+    output_file = "repeated_patterns_analysis.txt"
+    summary_file = "repeated_patterns_summary.txt"
     
-    print("🚀 Starting text processing...")
-    print("=" * 50)
+    print("🔍 Starting repeated pattern analysis...")
+    print("=" * 60)
     
-    # Option 1: Basic unique line and word extraction
-    print("\n1️⃣ Basic unique data extraction:")
-    clean_and_extract_unique_data(input_file, output_file_unique)
+    # Check if input file exists
+    if not os.path.exists(input_file):
+        print(f"❌ Error: '{input_file}' not found!")
+        print("Make sure you've run the previous script first to generate the cleaned file.")
+        exit(1)
     
-    # Option 2: Extract specific patterns
-    print("\n2️⃣ Pattern-based extraction:")
-    extract_specific_patterns(input_file, output_file_patterns)
+    # Analyze repeated patterns
+    patterns = find_repeated_text_patterns(input_file, output_file, min_occurrences=2)
     
-    # Option 3: Advanced cleaning
-    print("\n3️⃣ Advanced text cleaning:")
-    advanced_text_cleaning(input_file, output_file_advanced)
-    
-    print("\n" + "=" * 50)
-    print("🎉 All processing complete!")
+    if patterns:
+        # Create summary report
+        create_summary_report(patterns, summary_file)
+        print(f"📋 Summary report saved to: {summary_file}")
+        
+        print("\n" + "=" * 60)
+        print("🎉 Repeated pattern analysis complete!")
+        print(f"📄 Check '{output_file}' for detailed analysis")
+        print(f"📋 Check '{summary_file}' for quick summary")
