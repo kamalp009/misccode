@@ -1,9 +1,9 @@
 import pandas as pd
 import os
 
-def create_unique_kedb_with_combined_descriptions(input_excel_path, output_excel_path):
+def create_unique_kedb_with_unique_combined_descriptions(input_excel_path, output_excel_path):
     """
-    Create a new Excel file with unique KEDB numbers and combined short descriptions
+    Create a new Excel file with unique KEDB numbers and combined UNIQUE short descriptions
     """
     
     try:
@@ -30,9 +30,11 @@ def create_unique_kedb_with_combined_descriptions(input_excel_path, output_excel
         df_clean['KEDB'] = df_clean['KEDB'].astype(str).str.strip()
         df_clean['short_description'] = df_clean['short_description'].astype(str).str.strip()
         
-        # Remove empty descriptions
+        # Remove empty descriptions and invalid entries
         df_clean = df_clean[df_clean['short_description'] != '']
         df_clean = df_clean[df_clean['short_description'].str.lower() != 'nan']
+        df_clean = df_clean[df_clean['KEDB'] != '']
+        df_clean = df_clean[df_clean['KEDB'].str.lower() != 'nan']
         
         print(f"🔍 Processing {len(df_clean)} valid records...")
         
@@ -46,39 +48,56 @@ def create_unique_kedb_with_combined_descriptions(input_excel_path, output_excel
         print(f"   • Duplicate KEDB numbers: {len(duplicate_kedbs)}")
         print(f"   • Total KEDB numbers after processing: {len(kedb_counts)}")
         
-        # Group by KEDB and combine short descriptions
-        print(f"🔗 Combining short descriptions for duplicate KEDBs...")
+        # Enhanced function to combine UNIQUE descriptions only
+        print(f"🔗 Removing duplicates and combining unique short descriptions for each KEDB...")
         
-        def combine_descriptions(group):
-            # Get unique descriptions (remove duplicates)
-            unique_descriptions = group['short_description'].drop_duplicates().tolist()
-            # Combine with ' - ' separator
-            combined = ' - '.join(unique_descriptions)
-            return combined
-        
-        # Group by KEDB and combine descriptions
-        kedb_grouped = df_clean.groupby('KEDB').agg({
-            'short_description': combine_descriptions
-        }).reset_index()
-        
-        # Rename the column for clarity
-        kedb_grouped.rename(columns={'short_description': 'combined_short_description'}, inplace=True)
-        
-        # Add additional statistics
-        kedb_grouped['original_record_count'] = df_clean.groupby('KEDB').size().values
-        kedb_grouped['unique_descriptions_count'] = df_clean.groupby('KEDB')['short_description'].nunique().values
-        
-        # Add other columns from original data (take first occurrence for each KEDB)
-        other_columns = [col for col in df_clean.columns if col not in ['KEDB', 'short_description']]
-        
-        if other_columns:
-            # Get first occurrence of each KEDB for other columns
-            first_occurrence = df_clean.groupby('KEDB').first()[other_columns].reset_index()
+        def combine_unique_descriptions(group):
+            """
+            Remove duplicate descriptions and combine only unique ones
+            """
+            # Convert all descriptions to lowercase for comparison (case-insensitive deduplication)
+            descriptions = group['short_description'].tolist()
             
-            # Merge with the grouped data
-            final_df = pd.merge(kedb_grouped, first_occurrence, on='KEDB', how='left')
-        else:
-            final_df = kedb_grouped
+            # Remove duplicates while preserving original case and order
+            unique_descriptions = []
+            seen_lower = set()
+            
+            for desc in descriptions:
+                desc_lower = desc.lower().strip()
+                if desc_lower not in seen_lower and desc_lower != '':
+                    unique_descriptions.append(desc.strip())
+                    seen_lower.add(desc_lower)
+            
+            # Combine unique descriptions with ' - ' separator
+            combined = ' - '.join(unique_descriptions)
+            return combined, len(descriptions), len(unique_descriptions)
+        
+        # Process each KEDB group
+        processed_data = []
+        
+        for kedb, group in df_clean.groupby('KEDB'):
+            combined_desc, original_count, unique_count = combine_unique_descriptions(group)
+            
+            # Get first occurrence for other columns
+            first_row = group.iloc[0]
+            
+            processed_row = {
+                'KEDB': kedb,
+                'combined_unique_short_description': combined_desc,
+                'original_record_count': original_count,
+                'unique_descriptions_count': unique_count,
+                'duplicates_removed': original_count - unique_count
+            }
+            
+            # Add other columns from the first occurrence
+            for col in df_clean.columns:
+                if col not in ['KEDB', 'short_description']:
+                    processed_row[col] = first_row[col]
+            
+            processed_data.append(processed_row)
+        
+        # Create DataFrame from processed data
+        final_df = pd.DataFrame(processed_data)
         
         # Sort by KEDB
         final_df = final_df.sort_values('KEDB')
@@ -86,27 +105,42 @@ def create_unique_kedb_with_combined_descriptions(input_excel_path, output_excel
         # Save to new Excel file
         final_df.to_excel(output_excel_path, index=False)
         
+        # Calculate statistics
+        total_duplicates_removed = final_df['duplicates_removed'].sum()
+        kedbs_with_duplicates = len(final_df[final_df['duplicates_removed'] > 0])
+        
         print(f"\n✅ Processing complete!")
         print(f"📊 Final results:")
         print(f"   • Total unique KEDB numbers: {len(final_df)}")
-        print(f"   • Records with combined descriptions: {len(final_df[final_df['original_record_count'] > 1])}")
+        print(f"   • KEDBs with duplicate descriptions removed: {kedbs_with_duplicates}")
+        print(f"   • Total duplicate descriptions removed: {total_duplicates_removed}")
         print(f"   • Records with single descriptions: {len(final_df[final_df['original_record_count'] == 1])}")
         print(f"💾 New Excel file created: {output_excel_path}")
         
         # Show sample of results
         print(f"\n📋 Sample Results:")
-        display_columns = ['KEDB', 'combined_short_description', 'original_record_count']
-        print(final_df[display_columns].head(10).to_string(index=False))
+        display_columns = ['KEDB', 'combined_unique_short_description', 'original_record_count', 'unique_descriptions_count', 'duplicates_removed']
+        available_columns = [col for col in display_columns if col in final_df.columns]
+        print(final_df[available_columns].head(10).to_string(index=False, max_colwidth=50))
         
-        # Show examples of combined descriptions
-        combined_examples = final_df[final_df['original_record_count'] > 1].head(3)
-        if len(combined_examples) > 0:
-            print(f"\n🔗 Examples of Combined Descriptions:")
-            for _, row in combined_examples.iterrows():
+        # Show examples of duplicate removal
+        duplicate_examples = final_df[final_df['duplicates_removed'] > 0].head(3)
+        if len(duplicate_examples) > 0:
+            print(f"\n🔍 Examples of Duplicate Removal:")
+            for _, row in duplicate_examples.iterrows():
                 print(f"KEDB: {row['KEDB']}")
-                print(f"Combined: {row['combined_short_description'][:100]}...")
-                print(f"Original count: {row['original_record_count']}")
-                print("-" * 50)
+                print(f"Original records: {row['original_record_count']}")
+                print(f"Unique descriptions: {row['unique_descriptions_count']}")
+                print(f"Duplicates removed: {row['duplicates_removed']}")
+                print(f"Combined: {row['combined_unique_short_description'][:100]}...")
+                print("-" * 60)
+        
+        # Show examples where no duplicates were found
+        no_duplicates = final_df[final_df['duplicates_removed'] == 0].head(2)
+        if len(no_duplicates) > 0:
+            print(f"\n✅ Examples with No Duplicates:")
+            for _, row in no_duplicates.iterrows():
+                print(f"KEDB: {row['KEDB']} - {row['unique_descriptions_count']} unique description(s)")
         
         return final_df
         
@@ -115,121 +149,150 @@ def create_unique_kedb_with_combined_descriptions(input_excel_path, output_excel
     except Exception as e:
         print(f"❌ Error: {str(e)}")
 
-def create_detailed_analysis(final_df, analysis_output_path):
+def create_detailed_duplicate_analysis(final_df, analysis_output_path):
     """
-    Create detailed analysis of the KEDB combination process
+    Create detailed analysis focusing on duplicate removal process
     """
     
     try:
-        # Create analysis data
-        analysis_data = []
-        
         # Overall statistics
         total_kedbs = len(final_df)
-        duplicated_kedbs = len(final_df[final_df['original_record_count'] > 1])
-        unique_kedbs = len(final_df[final_df['original_record_count'] == 1])
-        max_combinations = final_df['original_record_count'].max()
-        avg_combinations = final_df['original_record_count'].mean()
+        total_original_records = final_df['original_record_count'].sum()
+        total_unique_descriptions = final_df['unique_descriptions_count'].sum()
+        total_duplicates_removed = final_df['duplicates_removed'].sum()
+        kedbs_with_duplicates = len(final_df[final_df['duplicates_removed'] > 0])
         
-        # KEDB with most combinations
-        most_combined = final_df.loc[final_df['original_record_count'].idxmax()]
+        # Duplicate removal efficiency
+        duplicate_removal_rate = (total_duplicates_removed / total_original_records * 100) if total_original_records > 0 else 0
         
         # Analysis summary
         summary_data = [{
             'Metric': 'Total Unique KEDB Numbers',
             'Value': total_kedbs
         }, {
-            'Metric': 'KEDBs with Multiple Descriptions',
-            'Value': duplicated_kedbs
+            'Metric': 'Total Original Records',
+            'Value': total_original_records
         }, {
-            'Metric': 'KEDBs with Single Description',
-            'Value': unique_kedbs
+            'Metric': 'Total Unique Descriptions After Deduplication',
+            'Value': total_unique_descriptions
         }, {
-            'Metric': 'Maximum Descriptions Combined',
-            'Value': max_combinations
+            'Metric': 'Total Duplicate Descriptions Removed',
+            'Value': total_duplicates_removed
         }, {
-            'Metric': 'Average Descriptions per KEDB',
-            'Value': round(avg_combinations, 2)
+            'Metric': 'KEDBs with Duplicates Removed',
+            'Value': kedbs_with_duplicates
         }, {
-            'Metric': 'KEDB with Most Combinations',
-            'Value': most_combined['KEDB']
+            'Metric': 'Duplicate Removal Rate (%)',
+            'Value': round(duplicate_removal_rate, 2)
         }]
         
-        # Distribution analysis
-        distribution_data = final_df['original_record_count'].value_counts().sort_index().reset_index()
-        distribution_data.columns = ['Number_of_Descriptions', 'Count_of_KEDBs']
+        # Distribution of duplicates removed
+        duplicate_distribution = final_df['duplicates_removed'].value_counts().sort_index().reset_index()
+        duplicate_distribution.columns = ['Duplicates_Removed', 'Count_of_KEDBs']
         
-        # Top KEDBs with most combinations
-        top_combinations = final_df.nlargest(10, 'original_record_count')[
-            ['KEDB', 'combined_short_description', 'original_record_count', 'unique_descriptions_count']
+        # Top KEDBs with most duplicates removed
+        top_duplicates_removed = final_df[final_df['duplicates_removed'] > 0].nlargest(10, 'duplicates_removed')[
+            ['KEDB', 'original_record_count', 'unique_descriptions_count', 'duplicates_removed', 'combined_unique_short_description']
         ].copy()
+        
+        # KEDBs with high duplicate ratios
+        final_df_with_ratio = final_df.copy()
+        final_df_with_ratio['duplicate_ratio'] = (final_df_with_ratio['duplicates_removed'] / final_df_with_ratio['original_record_count']) * 100
+        high_duplicate_ratio = final_df_with_ratio[final_df_with_ratio['duplicate_ratio'] > 0].nlargest(10, 'duplicate_ratio')[
+            ['KEDB', 'original_record_count', 'unique_descriptions_count', 'duplicates_removed', 'duplicate_ratio']
+        ].copy()
+        high_duplicate_ratio['duplicate_ratio'] = high_duplicate_ratio['duplicate_ratio'].round(2)
         
         # Save analysis to Excel
         with pd.ExcelWriter(analysis_output_path, engine='openpyxl') as writer:
             # Summary sheet
-            pd.DataFrame(summary_data).to_excel(writer, sheet_name='Summary_Statistics', index=False)
+            pd.DataFrame(summary_data).to_excel(writer, sheet_name='Duplicate_Removal_Summary', index=False)
             
-            # Distribution sheet
-            distribution_data.to_excel(writer, sheet_name='Description_Distribution', index=False)
+            # Duplicate distribution
+            duplicate_distribution.to_excel(writer, sheet_name='Duplicate_Distribution', index=False)
             
-            # Top combinations sheet
-            top_combinations.to_excel(writer, sheet_name='Top_Combinations', index=False)
+            # Top duplicates removed
+            top_duplicates_removed.to_excel(writer, sheet_name='Top_Duplicates_Removed', index=False)
             
-            # Full data sheet (first 1000 rows to avoid Excel limits)
-            final_df.head(1000).to_excel(writer, sheet_name='Sample_Data', index=False)
+            # High duplicate ratios
+            high_duplicate_ratio.to_excel(writer, sheet_name='High_Duplicate_Ratios', index=False)
+            
+            # Full processed data (first 1000 rows)
+            final_df.head(1000).to_excel(writer, sheet_name='Processed_Data_Sample', index=False)
         
-        print(f"📊 Detailed analysis saved to: {analysis_output_path}")
+        print(f"📊 Detailed duplicate removal analysis saved to: {analysis_output_path}")
+        
+        return {
+            'total_duplicates_removed': total_duplicates_removed,
+            'duplicate_removal_rate': duplicate_removal_rate,
+            'kedbs_with_duplicates': kedbs_with_duplicates
+        }
         
     except Exception as e:
         print(f"❌ Error creating analysis: {str(e)}")
+        return None
 
-def validate_and_preview_data(input_excel_path):
+def demonstrate_duplicate_removal(input_excel_path):
     """
-    Preview the input data to understand the structure
+    Show examples of how duplicate removal will work
     """
     
     try:
         df = pd.read_excel(input_excel_path)
         
-        print("🔍 DATA PREVIEW:")
-        print("=" * 50)
-        print(f"Total rows: {len(df)}")
-        print(f"Total columns: {len(df.columns)}")
-        print("\nColumns found:")
-        for i, col in enumerate(df.columns, 1):
-            print(f"  {i}. {col}")
+        if 'KEDB' not in df.columns or 'short_description' not in df.columns:
+            return
         
-        if 'KEDB' in df.columns and 'short_description' in df.columns:
-            kedb_stats = df['KEDB'].value_counts()
-            duplicates = kedb_stats[kedb_stats > 1]
-            
-            print(f"\nKEDB Analysis:")
-            print(f"  • Total KEDB entries: {len(df)}")
-            print(f"  • Unique KEDB numbers: {df['KEDB'].nunique()}")
-            print(f"  • Duplicate KEDB numbers: {len(duplicates)}")
-            
-            if len(duplicates) > 0:
-                print(f"  • Top 5 most duplicated KEDBs:")
-                for kedb, count in duplicates.head().items():
-                    print(f"    - {kedb}: {count} times")
-            
-            print(f"\nSample data:")
-            print(df[['KEDB', 'short_description']].head().to_string(index=False))
+        # Find a KEDB with duplicates to demonstrate
+        df_clean = df.dropna(subset=['KEDB', 'short_description'])
+        df_clean['KEDB'] = df_clean['KEDB'].astype(str).str.strip()
+        df_clean['short_description'] = df_clean['short_description'].astype(str).str.strip()
         
-        return True
+        kedb_counts = df_clean['KEDB'].value_counts()
+        duplicate_kedbs = kedb_counts[kedb_counts > 1].head(3)
+        
+        if len(duplicate_kedbs) > 0:
+            print(f"\n🔍 DUPLICATE REMOVAL DEMONSTRATION:")
+            print("=" * 60)
+            
+            for kedb in duplicate_kedbs.index:
+                kedb_records = df_clean[df_clean['KEDB'] == kedb]
+                descriptions = kedb_records['short_description'].tolist()
+                
+                print(f"\nKEDB: {kedb}")
+                print(f"Original descriptions ({len(descriptions)}):")
+                for i, desc in enumerate(descriptions, 1):
+                    print(f"  {i}. {desc}")
+                
+                # Show unique descriptions
+                unique_descriptions = []
+                seen_lower = set()
+                for desc in descriptions:
+                    desc_lower = desc.lower().strip()
+                    if desc_lower not in seen_lower:
+                        unique_descriptions.append(desc.strip())
+                        seen_lower.add(desc_lower)
+                
+                print(f"\nAfter removing duplicates ({len(unique_descriptions)}):")
+                for i, desc in enumerate(unique_descriptions, 1):
+                    print(f"  {i}. {desc}")
+                
+                combined = ' - '.join(unique_descriptions)
+                print(f"\nCombined result:")
+                print(f"  {combined}")
+                print("-" * 60)
         
     except Exception as e:
-        print(f"❌ Error previewing data: {str(e)}")
-        return False
+        print(f"❌ Error in demonstration: {str(e)}")
 
 # Main execution
 if __name__ == "__main__":
     # File paths - UPDATE THESE TO YOUR ACTUAL PATHS
     input_excel = "shee1.xlsx"  # Your input Excel file
-    output_excel = "unique_kedb_combined_descriptions.xlsx"
-    analysis_excel = "kedb_combination_analysis.xlsx"
+    output_excel = "unique_kedb_unique_combined_descriptions.xlsx"
+    analysis_excel = "duplicate_removal_analysis.xlsx"
     
-    print("🚀 Starting KEDB Description Combination Process...")
+    print("🚀 Starting KEDB Unique Description Combination Process...")
     print("=" * 70)
     
     # Check if input file exists
@@ -244,34 +307,33 @@ if __name__ == "__main__":
                 print(f"  - {file}")
         exit(1)
     
-    # Preview the data first
-    print("🔍 Previewing input data...")
-    if validate_and_preview_data(input_excel):
-        
-        # Ask for confirmation
-        print(f"\n❓ Proceed with combining descriptions for duplicate KEDB numbers? (y/n): ", end="")
-        confirmation = input().lower().strip()
-        
-        if confirmation in ['y', 'yes']:
-            # Process the data
-            result_df = create_unique_kedb_with_combined_descriptions(input_excel, output_excel)
-            
-            if result_df is not None:
-                # Create detailed analysis
-                create_detailed_analysis(result_df, analysis_excel)
-                
-                print("\n" + "=" * 70)
-                print("🎉 KEDB COMBINATION PROCESS COMPLETE!")
-                print(f"📊 Main output: {output_excel}")
-                print(f"📈 Analysis report: {analysis_excel}")
-                
-                print(f"\n✅ Summary:")
-                print(f"   • Created {len(result_df)} unique KEDB records")
-                print(f"   • Combined descriptions using ' - ' separator")
-                print(f"   • Preserved all other column data")
-                
-        else:
-            print("❌ Process cancelled by user.")
+    # Demonstrate duplicate removal
+    print("🔍 Analyzing duplicate patterns in your data...")
+    demonstrate_duplicate_removal(input_excel)
     
+    # Ask for confirmation
+    print(f"\n❓ Proceed with removing duplicate descriptions and combining unique ones? (y/n): ", end="")
+    confirmation = input().lower().strip()
+    
+    if confirmation in ['y', 'yes']:
+        # Process the data
+        result_df = create_unique_kedb_with_unique_combined_descriptions(input_excel, output_excel)
+        
+        if result_df is not None:
+            # Create detailed analysis
+            analysis_stats = create_detailed_duplicate_analysis(result_df, analysis_excel)
+            
+            print("\n" + "=" * 70)
+            print("🎉 ENHANCED KEDB PROCESSING COMPLETE!")
+            print(f"📊 Main output: {output_excel}")
+            print(f"📈 Analysis report: {analysis_excel}")
+            
+            if analysis_stats:
+                print(f"\n✅ Duplicate Removal Summary:")
+                print(f"   • Total duplicates removed: {analysis_stats['total_duplicates_removed']}")
+                print(f"   • Duplicate removal rate: {analysis_stats['duplicate_removal_rate']:.2f}%")
+                print(f"   • KEDBs with duplicates cleaned: {analysis_stats['kedbs_with_duplicates']}")
+                print(f"   • Final unique KEDB records: {len(result_df)}")
+            
     else:
-        print("❌ Cannot proceed due to data preview errors.")
+        print("❌ Process cancelled by user.")
