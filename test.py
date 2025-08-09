@@ -1,369 +1,311 @@
 import pandas as pd
 import re
-from collections import Counter
+from collections import defaultdict
 import os
 
-def analyze_issue_type_word_frequency_with_unique(excel_file_path, output_excel_path, unique_words_excel_path, min_word_length=3, min_count=2):
+def process_resolution_data_and_generate_prompts(sheet1_path, excel2_path, output_file):
     """
-    Analyze word frequency within each issue type's combined short descriptions
-    and create Excel files including unique words that appear only in specific issue types
+    Read data from two Excel files, match KEDB with servicenow_id,
+    combine resolution data by issue type, and generate AI prompts
     """
     
     try:
-        # Read Excel file
-        print("📊 Reading Excel file...")
-        df = pd.read_excel(excel_file_path)
+        # Read both Excel files
+        print("📊 Reading Excel files...")
         
-        # Check if required columns exist
-        if 'short_description' not in df.columns or 'issue_type' not in df.columns:
-            print("❌ Error: Excel file must contain 'short_description' and 'issue_type' columns")
+        # Read sheet1.xlsx - contains KEDB and issue_type columns
+        sheet1_df = pd.read_excel(sheet1_path)
+        print(f"📄 Sheet1 loaded: {len(sheet1_df)} records")
+        
+        # Read excel2.xlsx - contains servicenow_id and resolution columns
+        excel2_df = pd.read_excel(excel2_path)
+        print(f"📄 Excel2 loaded: {len(excel2_df)} records")
+        
+        # Validate required columns
+        required_sheet1_cols = ['KEDB', 'issue_type']
+        required_excel2_cols = ['servicenow_id', 'resolution']
+        
+        # Check if short_description exists in sheet1 (for prompt generation)
+        if 'short_description' in sheet1_df.columns:
+            required_sheet1_cols.append('short_description')
+            has_short_description = True
+        else:
+            has_short_description = False
+            print("⚠️ Warning: 'short_description' column not found in sheet1. Will generate generic prompts.")
+        
+        for col in required_sheet1_cols:
+            if col not in sheet1_df.columns:
+                print(f"❌ Error: Column '{col}' not found in sheet1.xlsx")
+                return None
+        
+        for col in required_excel2_cols:
+            if col not in excel2_df.columns:
+                print(f"❌ Error: Column '{col}' not found in excel2.xlsx")
+                return None
+        
+        # Clean data - remove nulls and convert to string for matching
+        sheet1_clean = sheet1_df.dropna(subset=['KEDB', 'issue_type']).copy()
+        excel2_clean = excel2_df.dropna(subset=['servicenow_id', 'resolution']).copy()
+        
+        # Convert KEDB and servicenow_id to string for matching
+        sheet1_clean['KEDB'] = sheet1_clean['KEDB'].astype(str).str.strip()
+        excel2_clean['servicenow_id'] = excel2_clean['servicenow_id'].astype(str).str.strip()
+        
+        print(f"🔍 Matching KEDB with servicenow_id...")
+        
+        # Merge the dataframes based on KEDB = servicenow_id
+        merged_df = pd.merge(
+            sheet1_clean, 
+            excel2_clean, 
+            left_on='KEDB', 
+            right_on='servicenow_id', 
+            how='inner'
+        )
+        
+        print(f"✅ Found {len(merged_df)} matching records")
+        
+        if merged_df.empty:
+            print("❌ No matching records found between KEDB and servicenow_id")
             return None
         
-        # Remove rows with null values in required columns
-        df_clean = df.dropna(subset=['short_description', 'issue_type'])
-        print(f"📝 Processing {len(df_clean)} records with valid data")
+        # Group by issue_type and combine resolution data
+        print(f"📋 Combining resolution data by issue type...")
         
-        # Get unique issue types
-        unique_issue_types = df_clean['issue_type'].unique()
-        print(f"🎯 Found {len(unique_issue_types)} unique issue types")
+        issue_type_resolutions = defaultdict(list)
+        issue_type_descriptions = defaultdict(list)
         
-        # Results list to store word frequency data
-        results_data = []
-        issue_type_stats = {}
+        for _, row in merged_df.iterrows():
+            issue_type = row['issue_type']
+            resolution = str(row['resolution']).strip()
+            
+            if resolution and resolution.lower() not in ['nan', 'none', '']:
+                issue_type_resolutions[issue_type].append(resolution)
+            
+            if has_short_description and pd.notna(row['short_description']):
+                description = str(row['short_description']).strip()
+                if description and description.lower() not in ['nan', 'none', '']:
+                    issue_type_descriptions[issue_type].append(description)
         
-        # Dictionary to store all words for each issue type
-        issue_type_words = {}
+        # Generate combined resolution data and prompts
+        prompt_data = []
         
-        # Process each issue type
-        for issue_type in unique_issue_types:
-            print(f"\n🔍 Processing issue type: {issue_type}")
+        for issue_type, resolutions in issue_type_resolutions.items():
+            # Combine all resolutions for this issue type
+            combined_resolutions = "\n".join([f"• {res}" for res in resolutions])
             
-            # Filter data for current issue type
-            issue_df = df_clean[df_clean['issue_type'] == issue_type]
+            # Get sample descriptions if available
+            sample_descriptions = ""
+            if issue_type in issue_type_descriptions:
+                descriptions = list(set(issue_type_descriptions[issue_type]))[:5]  # Get unique, limit to 5
+                sample_descriptions = "\n".join([f"- {desc}" for desc in descriptions])
             
-            # Combine all short descriptions for this issue type
-            combined_descriptions = ""
-            for desc in issue_df['short_description']:
-                combined_descriptions += " " + str(desc).lower()
+            # Generate AI prompt for this issue type
+            ai_prompt = generate_resolution_prompt(issue_type, combined_resolutions, sample_descriptions, has_short_description)
             
-            # Extract words from combined descriptions
-            words = re.findall(r'\b[a-zA-Z0-9]+\b', combined_descriptions)
-            
-            # Filter words by minimum length
-            filtered_words = [word for word in words if len(word) >= min_word_length]
-            
-            # Count word frequencies
-            word_counts = Counter(filtered_words)
-            
-            # Filter by minimum count
-            significant_words = {word: count for word, count in word_counts.items() if count >= min_count}
-            
-            # Store words for this issue type (for unique word analysis)
-            issue_type_words[issue_type] = set(significant_words.keys())
-            
-            # Store statistics
-            issue_type_stats[issue_type] = {
-                'total_descriptions': len(issue_df),
-                'total_words': len(filtered_words),
-                'unique_words': len(word_counts),
-                'significant_words': len(significant_words)
-            }
-            
-            # Add to results
-            for word, count in significant_words.items():
-                results_data.append({
-                    'issue_type': issue_type,
-                    'word': word,
-                    'count': count,
-                    'total_descriptions_in_type': len(issue_df),
-                    'word_frequency_percentage': round((count / len(filtered_words)) * 100, 2)
-                })
-            
-            print(f"   📄 Descriptions: {len(issue_df)}")
-            print(f"   📝 Total words: {len(filtered_words)}")
-            print(f"   🔤 Unique words: {len(word_counts)}")
-            print(f"   ⭐ Significant words (≥{min_count}): {len(significant_words)}")
-        
-        # Find unique words for each issue type
-        print(f"\n🔍 Finding unique words for each issue type...")
-        unique_words_data = find_unique_words_per_issue_type(issue_type_words, results_data)
-        
-        # Create DataFrame from results
-        results_df = pd.DataFrame(results_data)
-        unique_words_df = pd.DataFrame(unique_words_data)
-        
-        if results_df.empty:
-            print("❌ No data generated. Try reducing min_word_length or min_count parameters.")
-            return None
-        
-        # Sort by issue_type and count (descending)
-        results_df = results_df.sort_values(['issue_type', 'count'], ascending=[True, False])
-        unique_words_df = unique_words_df.sort_values(['issue_type', 'count'], ascending=[True, False])
-        
-        # Create summary statistics sheet
-        summary_data = []
-        for issue_type, stats in issue_type_stats.items():
-            unique_count = len(unique_words_df[unique_words_df['issue_type'] == issue_type])
-            summary_data.append({
+            prompt_data.append({
                 'issue_type': issue_type,
-                'total_descriptions': stats['total_descriptions'],
-                'total_words_analyzed': stats['total_words'],
-                'unique_words_found': stats['unique_words'],
-                'significant_words': stats['significant_words'],
-                'unique_to_this_type': unique_count
+                'total_resolutions': len(resolutions),
+                'unique_resolutions': len(set(resolutions)),
+                'combined_resolution_steps': combined_resolutions,
+                'sample_descriptions': sample_descriptions if sample_descriptions else 'N/A',
+                'ai_prompt_for_resolution_generation': ai_prompt
             })
         
-        summary_df = pd.DataFrame(summary_data)
-        summary_df = summary_df.sort_values('total_descriptions', ascending=False)
+        # Create DataFrame and save to Excel
+        prompt_df = pd.DataFrame(prompt_data)
+        prompt_df = prompt_df.sort_values('total_resolutions', ascending=False)
         
-        # Write main analysis to Excel with multiple sheets
-        with pd.ExcelWriter(output_excel_path, engine='openpyxl') as writer:
-            # Main results sheet
-            results_df.to_excel(writer, sheet_name='Word_Frequency_Analysis', index=False)
+        # Save to Excel with multiple sheets
+        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+            # Main prompts sheet
+            prompt_df.to_excel(writer, sheet_name='Resolution_Prompts', index=False)
             
-            # Summary statistics sheet
-            summary_df.to_excel(writer, sheet_name='Summary_Statistics', index=False)
+            # Detailed matching data
+            merged_df.to_excel(writer, sheet_name='Matched_Data', index=False)
             
-            # Top words per issue type sheet
-            create_top_words_sheet(results_df, writer)
+            # Summary statistics
+            create_resolution_summary(prompt_df, writer)
         
-        # Write unique words analysis to separate Excel file
-        with pd.ExcelWriter(unique_words_excel_path, engine='openpyxl') as writer:
-            # Unique words main sheet
-            unique_words_df.to_excel(writer, sheet_name='Unique_Words_Per_Type', index=False)
-            
-            # Create comparison matrix sheet
-            create_word_comparison_matrix(issue_type_words, writer)
-            
-            # Create unique words summary
-            create_unique_words_summary(unique_words_df, writer)
+        print(f"\n✅ Processing complete!")
+        print(f"📊 Processed {len(issue_type_resolutions)} issue types")
+        print(f"💾 Prompts and data saved to: {output_file}")
         
-        print(f"\n✅ Analysis complete!")
-        print(f"📊 Total records processed: {len(results_data)}")
-        print(f"🔍 Unique words found: {len(unique_words_data)}")
-        print(f"💾 Main results saved to: {output_excel_path}")
-        print(f"💾 Unique words analysis saved to: {unique_words_excel_path}")
+        # Display sample prompts
+        display_sample_prompts(prompt_df)
         
-        # Print quick summary
-        print(f"\n📈 QUICK SUMMARY:")
-        for issue_type, stats in issue_type_stats.items():
-            unique_count = len(unique_words_df[unique_words_df['issue_type'] == issue_type])
-            print(f"  {issue_type}: {stats['significant_words']} total words, {unique_count} unique words")
+        return prompt_df
         
-        return results_df, unique_words_df, summary_df
-        
-    except FileNotFoundError:
-        print(f"❌ Error: Excel file '{excel_file_path}' not found!")
+    except FileNotFoundError as e:
+        print(f"❌ Error: File not found - {str(e)}")
     except Exception as e:
         print(f"❌ Error: {str(e)}")
 
-def find_unique_words_per_issue_type(issue_type_words, results_data):
+def generate_resolution_prompt(issue_type, combined_resolutions, sample_descriptions, has_descriptions):
     """
-    Find words that appear in one issue type but not in others
+    Generate AI prompt for creating resolution steps based on combined data
     """
     
-    unique_words_data = []
-    
-    # Create a dictionary for quick lookup of word counts
-    word_count_lookup = {}
-    for item in results_data:
-        key = (item['issue_type'], item['word'])
-        word_count_lookup[key] = item
-    
-    # Check each issue type's words against all other issue types
-    for current_issue_type, current_words in issue_type_words.items():
-        other_issue_types = [it for it in issue_type_words.keys() if it != current_issue_type]
-        
-        # Get all words from other issue types
-        other_words = set()
-        for other_type in other_issue_types:
-            other_words.update(issue_type_words[other_type])
-        
-        # Find words that are in current type but not in any other type
-        unique_words = current_words - other_words
-        
-        # Add unique words with their counts to results
-        for word in unique_words:
-            key = (current_issue_type, word)
-            if key in word_count_lookup:
-                word_data = word_count_lookup[key]
-                unique_words_data.append({
-                    'issue_type': current_issue_type,
-                    'word': word,
-                    'count': word_data['count'],
-                    'word_frequency_percentage': word_data['word_frequency_percentage'],
-                    'total_descriptions_in_type': word_data['total_descriptions_in_type'],
-                    'uniqueness_score': calculate_uniqueness_score(word, current_issue_type, issue_type_words)
-                })
-    
-    return unique_words_data
+    if has_descriptions and sample_descriptions:
+        prompt = f"""You are an expert IT support specialist. Based on the following data for "{issue_type}" issues, generate step-by-step resolution instructions for new similar problems.
 
-def calculate_uniqueness_score(word, issue_type, issue_type_words):
-    """
-    Calculate a uniqueness score based on how many issue types contain this word
-    Score = 100 means completely unique to one type
-    """
-    
-    appearances = 0
-    for it_type, words in issue_type_words.items():
-        if word in words:
-            appearances += 1
-    
-    # Higher score for more unique words
-    uniqueness_score = round(100 / appearances, 2)
-    return uniqueness_score
+**Issue Type:** {issue_type}
 
-def create_word_comparison_matrix(issue_type_words, writer):
-    """
-    Create a matrix showing word overlap between issue types
-    """
-    
-    issue_types = list(issue_type_words.keys())
-    matrix_data = []
-    
-    for type1 in issue_types:
-        row = {'issue_type': type1}
-        for type2 in issue_types:
-            if type1 == type2:
-                row[type2] = len(issue_type_words[type1])  # Total words in same type
-            else:
-                # Count common words between type1 and type2
-                common_words = len(issue_type_words[type1] & issue_type_words[type2])
-                row[type2] = common_words
-        matrix_data.append(row)
-    
-    matrix_df = pd.DataFrame(matrix_data)
-    matrix_df.to_excel(writer, sheet_name='Word_Overlap_Matrix', index=False)
+**Historical Resolution Steps:**
+{combined_resolutions}
 
-def create_unique_words_summary(unique_words_df, writer):
-    """
-    Create a summary sheet for unique words analysis
-    """
+**Sample Problem Descriptions:**
+{sample_descriptions}
+
+**Task:** When given a new short description for a "{issue_type}" issue, analyze it and provide:
+
+1. **Root Cause Analysis:** Identify the likely cause based on the description
+2. **Step-by-Step Resolution:** Provide detailed resolution steps based on historical successful resolutions
+3. **Prerequisites:** List any prerequisites or permissions needed
+4. **Expected Outcome:** What the user should expect after following the steps
+5. **Alternative Solutions:** If primary solution doesn't work, suggest alternatives
+6. **Prevention:** Recommend steps to prevent this issue in the future
+
+**Output Format:**
+- Use clear, numbered steps
+- Include specific commands, settings, or actions where applicable
+- Mention estimated time for resolution
+- Include any warnings or cautions
+
+**Example Usage:**
+Input: "New {issue_type} problem description here"
+Output: Structured resolution steps following the above format."""
+
+    else:
+        prompt = f"""You are an expert IT support specialist. Based on the following historical resolution data for "{issue_type}" issues, generate step-by-step resolution instructions for new similar problems.
+
+**Issue Type:** {issue_type}
+
+**Historical Resolution Steps:**
+{combined_resolutions}
+
+**Task:** When given a new problem description related to "{issue_type}" issues, provide:
+
+1. **Problem Analysis:** Analyze the description and categorize the issue
+2. **Step-by-Step Resolution:** Provide detailed resolution steps based on historical successful resolutions above
+3. **Prerequisites:** List any prerequisites or permissions needed
+4. **Expected Outcome:** What should happen after following the steps
+5. **Troubleshooting:** Additional steps if the primary solution doesn't work
+6. **Best Practices:** Recommendations to prevent similar issues
+
+**Output Format:**
+- Use clear, numbered steps
+- Include specific technical details where applicable
+- Mention estimated resolution time
+- Include any important warnings
+
+**Example Usage:**
+Input: "Problem description for {issue_type} issue"
+Output: Comprehensive resolution guide following the above structure."""
+
+    return prompt
+
+def create_resolution_summary(prompt_df, writer):
+    """Create summary statistics sheet"""
     
     summary_data = []
+    total_resolutions = prompt_df['total_resolutions'].sum()
     
-    for issue_type in unique_words_df['issue_type'].unique():
-        type_data = unique_words_df[unique_words_df['issue_type'] == issue_type]
-        
+    for _, row in prompt_df.iterrows():
         summary_data.append({
-            'issue_type': issue_type,
-            'total_unique_words': len(type_data),
-            'avg_word_count': round(type_data['count'].mean(), 2),
-            'max_word_count': type_data['count'].max(),
-            'top_unique_word': type_data.iloc[0]['word'] if len(type_data) > 0 else '',
-            'top_word_count': type_data.iloc[0]['count'] if len(type_data) > 0 else 0
+            'issue_type': row['issue_type'],
+            'total_resolutions': row['total_resolutions'],
+            'unique_resolutions': row['unique_resolutions'],
+            'resolution_diversity': round((row['unique_resolutions'] / row['total_resolutions']) * 100, 2) if row['total_resolutions'] > 0 else 0,
+            'percentage_of_total': round((row['total_resolutions'] / total_resolutions) * 100, 2)
         })
     
     summary_df = pd.DataFrame(summary_data)
-    summary_df = summary_df.sort_values('total_unique_words', ascending=False)
-    summary_df.to_excel(writer, sheet_name='Unique_Words_Summary', index=False)
+    summary_df.to_excel(writer, sheet_name='Summary_Statistics', index=False)
 
-def create_top_words_sheet(results_df, writer):
-    """Create a sheet showing top words for each issue type"""
+def display_sample_prompts(prompt_df):
+    """Display sample prompts for verification"""
     
-    top_words_data = []
+    print(f"\n🤖 SAMPLE AI PROMPTS GENERATED:")
+    print("=" * 80)
     
-    for issue_type in results_df['issue_type'].unique():
-        issue_data = results_df[results_df['issue_type'] == issue_type].head(20)  # Top 20 words
-        
-        for rank, (_, row) in enumerate(issue_data.iterrows(), 1):
-            top_words_data.append({
-                'issue_type': issue_type,
-                'rank': rank,
-                'word': row['word'],
-                'count': row['count'],
-                'frequency_percentage': row['word_frequency_percentage']
-            })
+    # Show top 3 issue types by resolution count
+    top_3 = prompt_df.head(3)
     
-    top_words_df = pd.DataFrame(top_words_data)
-    top_words_df.to_excel(writer, sheet_name='Top_Words_Per_Type', index=False)
+    for i, (_, row) in enumerate(top_3.iterrows(), 1):
+        print(f"\n{i}. ISSUE TYPE: {row['issue_type']}")
+        print(f"   Resolutions: {row['total_resolutions']} (Unique: {row['unique_resolutions']})")
+        print(f"   Prompt Preview:")
+        # Show first 300 characters of the prompt
+        prompt_preview = row['ai_prompt_for_resolution_generation'][:300] + "..."
+        print(f"   {prompt_preview}")
+        print("-" * 60)
 
-def create_cross_type_analysis(unique_words_df, output_folder):
-    """
-    Create additional analysis files for cross-type comparison
-    """
+def create_individual_prompt_files(prompt_df, output_folder):
+    """Create individual prompt files for each issue type"""
     
     try:
         os.makedirs(output_folder, exist_ok=True)
         
-        # Analysis 1: Issue types with most unique words
-        type_unique_counts = unique_words_df.groupby('issue_type').size().reset_index(name='unique_word_count')
-        type_unique_counts = type_unique_counts.sort_values('unique_word_count', ascending=False)
-        type_unique_counts.to_excel(f"{output_folder}/issue_types_by_uniqueness.xlsx", index=False)
+        for _, row in prompt_df.iterrows():
+            issue_type = row['issue_type']
+            safe_filename = re.sub(r'[^\w\-_.]', '_', issue_type)
+            
+            filename = f"{output_folder}/prompt_{safe_filename}.txt"
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(f"AI RESOLUTION PROMPT FOR: {issue_type}\n")
+                f.write("=" * 60 + "\n\n")
+                f.write(row['ai_prompt_for_resolution_generation'])
+                f.write(f"\n\n--- STATISTICS ---\n")
+                f.write(f"Total Resolutions: {row['total_resolutions']}\n")
+                f.write(f"Unique Resolutions: {row['unique_resolutions']}\n")
         
-        # Analysis 2: High-frequency unique words
-        high_freq_unique = unique_words_df[unique_words_df['count'] >= 5].copy()
-        high_freq_unique = high_freq_unique.sort_values(['count', 'uniqueness_score'], ascending=[False, False])
-        high_freq_unique.to_excel(f"{output_folder}/high_frequency_unique_words.xlsx", index=False)
-        
-        print(f"📁 Cross-type analysis files saved to: {output_folder}/")
+        print(f"📁 Individual prompt files saved to: {output_folder}/")
         
     except Exception as e:
-        print(f"❌ Error in cross-type analysis: {str(e)}")
+        print(f"❌ Error creating individual files: {str(e)}")
 
 # Main execution
 if __name__ == "__main__":
     # File paths - UPDATE THESE TO YOUR ACTUAL PATHS
-    excel_file = "your_excel_file.xlsx"  # Change this to your Excel file path
-    output_excel = "issue_type_word_frequency_analysis.xlsx"
-    unique_words_excel = "unique_words_per_issue_type.xlsx"
-    output_folder = "cross_type_analysis"
+    sheet1_file = "shee1.xlsx"        # Contains KEDB and issue_type columns
+    excel2_file = "excel2.xlsx"       # Contains servicenow_id and resolution columns
+    output_excel = "resolution_prompts_analysis.xlsx"
+    prompt_files_folder = "individual_prompts"
     
-    print("🚀 Starting Enhanced Issue Type Word Frequency Analysis...")
+    print("🚀 Starting Resolution Data Processing & Prompt Generation...")
     print("=" * 80)
     
-    # Check if input file exists
-    if not os.path.exists(excel_file):
-        print(f"❌ Error: Excel file '{excel_file}' not found!")
-        print("Please update the 'excel_file' variable with the correct path.")
-        
-        # Show current directory files for reference
-        print(f"\n📁 Files in current directory:")
-        for file in os.listdir('.'):
-            if file.endswith(('.xlsx', '.xls')):
-                print(f"  - {file}")
-        exit(1)
+    # Check if input files exist
+    for file_path, file_desc in [(sheet1_file, "Sheet1"), (excel2_file, "Excel2")]:
+        if not os.path.exists(file_path):
+            print(f"❌ Error: {file_desc} file '{file_path}' not found!")
+            print(f"Please update the file path in the script.")
+            
+            print(f"\n📁 Files in current directory:")
+            for file in os.listdir('.'):
+                if file.endswith(('.xlsx', '.xls')):
+                    print(f"  - {file}")
+            exit(1)
     
-    # Parameters for analysis
-    MIN_WORD_LENGTH = 3  # Minimum word length to consider
-    MIN_COUNT = 2        # Minimum count for a word to be included
-    
-    print(f"⚙️ Analysis parameters:")
-    print(f"   - Minimum word length: {MIN_WORD_LENGTH}")
-    print(f"   - Minimum word count: {MIN_COUNT}")
-    
-    # Main analysis
-    results_df, unique_words_df, summary_df = analyze_issue_type_word_frequency_with_unique(
-        excel_file, 
-        output_excel, 
-        unique_words_excel,
-        min_word_length=MIN_WORD_LENGTH, 
-        min_count=MIN_COUNT
+    # Process the data and generate prompts
+    result_df = process_resolution_data_and_generate_prompts(
+        sheet1_file, 
+        excel2_file, 
+        output_excel
     )
     
-    if results_df is not None and unique_words_df is not None:
-        # Generate cross-type analysis
-        print(f"\n🔬 Creating cross-type analysis...")
-        create_cross_type_analysis(unique_words_df, output_folder)
+    if result_df is not None:
+        # Create individual prompt files
+        create_individual_prompt_files(result_df, prompt_files_folder)
         
         print("\n" + "=" * 80)
-        print("🎉 Enhanced Analysis Complete!")
-        print(f"📊 Main word frequency results: {output_excel}")
-        print(f"🔍 Unique words analysis: {unique_words_excel}")
-        print(f"📁 Cross-type analysis: {output_folder}/")
+        print("🎉 PROCESSING COMPLETE!")
+        print(f"📊 Main analysis: {output_excel}")
+        print(f"📁 Individual prompts: {prompt_files_folder}/")
+        print(f"🤖 Ready to use AI prompts for resolution generation!")
         
-        # Show sample of unique words results
-        print(f"\n🔍 Sample Unique Words Results:")
-        if len(unique_words_df) > 0:
-            print(unique_words_df.head(10).to_string(index=False))
-        else:
-            print("No unique words found with current parameters. Try reducing min_count.")
-        
-        # Show summary statistics
-        print(f"\n📈 Unique Words Summary by Issue Type:")
-        type_summary = unique_words_df.groupby('issue_type').agg({
-            'word': 'count',
-            'count': ['mean', 'max'],
-            'uniqueness_score': 'mean'
-        }).round(2)
-        print(type_summary.to_string())
+        print(f"\n📈 SUMMARY:")
+        print(f"✅ Processed {len(result_df)} issue types")
+        print(f"📋 Total resolution entries: {result_df['total_resolutions'].sum()}")
+        print(f"🔍 Average resolutions per type: {result_df['total_resolutions'].mean():.1f}")
