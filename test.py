@@ -1,233 +1,240 @@
+import pandas as pd
 import re
-from collections import Counter, defaultdict
+from collections import Counter
 import os
 
-def find_repeated_text_patterns(input_file_path, output_file_path, min_occurrences=2):
+def analyze_specific_issue_type(excel_file_path, text_file_path, target_issue_types, output_file_path):
     """
-    Find and extract repeated text patterns from the cleaned file
+    Find matches between Excel short_description words and text file content
+    for specific issue types only
     """
     
     try:
-        # Read the cleaned file
-        with open(input_file_path, 'r', encoding='utf-8') as file:
-            content = file.read()
+        # Read Excel file
+        print("📊 Reading Excel file...")
+        df = pd.read_excel(excel_file_path)
         
-        lines = content.split('\n')
-        lines = [line.strip() for line in lines if line.strip()]
+        # Check if required columns exist
+        if 'short_description' not in df.columns or 'issue_type' not in df.columns:
+            print("❌ Error: Excel file must contain 'short_description' and 'issue_type' columns")
+            return None
         
-        # Dictionary to store different types of repeated patterns
-        repeated_patterns = {
-            'exact_lines': [],
-            'word_sequences': [],
-            'phrases': [],
-            'error_patterns': [],
-            'partial_matches': []
+        # Filter DataFrame for specific issue types
+        if isinstance(target_issue_types, str):
+            target_issue_types = [target_issue_types]
+        
+        filtered_df = df[df['issue_type'].isin(target_issue_types)]
+        print(f"🎯 Filtered to {len(filtered_df)} records for issue types: {', '.join(target_issue_types)}")
+        
+        if filtered_df.empty:
+            print("❌ No records found for the specified issue types!")
+            return None
+        
+        # Read text file
+        print("📄 Reading text file...")
+        with open(text_file_path, 'r', encoding='utf-8') as file:
+            text_content = file.read().lower()
+        
+        # Extract words from filtered short_description column
+        print("🔍 Extracting words from filtered short descriptions...")
+        all_description_words = []
+        word_to_issue_type = {}
+        
+        for index, row in filtered_df.iterrows():
+            if pd.notna(row['short_description']):
+                description = str(row['short_description']).lower()
+                issue_type = str(row['issue_type'])
+                
+                # Extract words (remove special characters, keep only alphanumeric)
+                words = re.findall(r'\b[a-zA-Z0-9]+\b', description)
+                
+                for word in words:
+                    if len(word) > 2:  # Only consider words with more than 2 characters
+                        all_description_words.append(word)
+                        
+                        # Track issue types for this word
+                        if word not in word_to_issue_type:
+                            word_to_issue_type[word] = set()
+                        word_to_issue_type[word].add(issue_type)
+        
+        print(f"📝 Found {len(set(all_description_words))} unique words in filtered descriptions")
+        
+        # Count occurrences of each word in text file
+        print("🔎 Searching for word matches in text file...")
+        word_matches = {}
+        
+        for word in set(all_description_words):
+            # Count how many times this word appears in the text file
+            pattern = r'\b' + re.escape(word) + r'\b'
+            matches = len(re.findall(pattern, text_content, re.IGNORECASE))
+            
+            if matches > 0:
+                word_matches[word] = {
+                    'count_in_text': matches,
+                    'count_in_descriptions': all_description_words.count(word),
+                    'issue_types': list(word_to_issue_type[word])
+                }
+        
+        # Sort by count in text file and get top 40
+        sorted_matches = sorted(word_matches.items(), key=lambda x: x[1]['count_in_text'], reverse=True)
+        top_40_matches = sorted_matches[:40]
+        
+        # Generate results
+        results = {
+            'target_issue_types': target_issue_types,
+            'filtered_records': len(filtered_df),
+            'total_unique_words': len(set(all_description_words)),
+            'words_found_in_text': len(word_matches),
+            'top_40_matches': top_40_matches
         }
         
-        print(f"📊 Analyzing {len(lines)} lines for repeated patterns...")
+        # Write results to file
+        write_specific_results_to_file(results, output_file_path, excel_file_path, text_file_path)
         
-        # 1. Find exact repeated lines
-        line_counts = Counter(lines)
-        repeated_patterns['exact_lines'] = [
-            (line, count) for line, count in line_counts.items() 
-            if count >= min_occurrences
-        ]
-        
-        # 2. Find repeated word sequences (2-5 words)
-        word_sequences = defaultdict(int)
-        for line in lines:
-            words = line.split()
-            for i in range(len(words)):
-                for seq_len in range(2, min(6, len(words) - i + 1)):
-                    sequence = ' '.join(words[i:i + seq_len])
-                    if len(sequence) > 10:  # Only consider meaningful sequences
-                        word_sequences[sequence] += 1
-        
-        repeated_patterns['word_sequences'] = [
-            (seq, count) for seq, count in word_sequences.items() 
-            if count >= min_occurrences
-        ]
-        
-        # 3. Find repeated phrases using regex patterns
-        phrase_patterns = [
-            r'APPID[^\s]+',
-            r'[A-Z_]+\[[^\]]+\]',
-            r'BUSINESS_TRANSACTION[^\s]*',
-            r'COLLECTION[^\s]*',
-            r'DETECTED[^.]*',
-            r'PROBLEM[^.]*',
-            r'ERROR[^.]*',
-            r'FAILED[^.]*'
-        ]
-        
-        phrase_counts = defaultdict(int)
-        for pattern in phrase_patterns:
-            matches = re.findall(pattern, content, re.IGNORECASE)
-            for match in matches:
-                phrase_counts[match.strip()] += 1
-        
-        repeated_patterns['phrases'] = [
-            (phrase, count) for phrase, count in phrase_counts.items() 
-            if count >= min_occurrences and len(phrase) > 5
-        ]
-        
-        # 4. Find error patterns specifically
-        error_keywords = ['ERROR', 'FAILED', 'PROBLEM', 'VIOLATION', 'DETECTED']
-        error_lines = []
-        for line in lines:
-            if any(keyword in line.upper() for keyword in error_keywords):
-                error_lines.append(line)
-        
-        error_counts = Counter(error_lines)
-        repeated_patterns['error_patterns'] = [
-            (error, count) for error, count in error_counts.items() 
-            if count >= min_occurrences
-        ]
-        
-        # 5. Find partial matches (similar lines with small differences)
-        partial_matches = defaultdict(list)
-        for i, line1 in enumerate(lines):
-            for j, line2 in enumerate(lines[i+1:], i+1):
-                similarity = calculate_similarity(line1, line2)
-                if 0.7 <= similarity < 1.0:  # 70-99% similar
-                    key = min(line1, line2)  # Use lexicographically smaller as key
-                    partial_matches[key].append((line1, line2, similarity))
-        
-        repeated_patterns['partial_matches'] = [
-            (key, matches) for key, matches in partial_matches.items() 
-            if len(matches) >= min_occurrences
-        ]
-        
-        # Write results to output file
-        write_repeated_patterns_to_file(repeated_patterns, output_file_path)
-        
-        print(f"✅ Repeated pattern analysis complete!")
+        print(f"✅ Analysis complete for issue types: {', '.join(target_issue_types)}")
+        print(f"📊 {len(word_matches)} words found in text file")
         print(f"💾 Results saved to: {output_file_path}")
         
-        return repeated_patterns
+        return results
         
-    except FileNotFoundError:
-        print(f"❌ Error: Input file '{input_file_path}' not found.")
+    except FileNotFoundError as e:
+        print(f"❌ Error: File not found - {str(e)}")
     except Exception as e:
         print(f"❌ Error: {str(e)}")
 
-def calculate_similarity(str1, str2):
-    """Calculate similarity ratio between two strings"""
-    from difflib import SequenceMatcher
-    return SequenceMatcher(None, str1, str2).ratio()
-
-def write_repeated_patterns_to_file(patterns, output_file):
-    """Write all repeated patterns to output file"""
+def write_specific_results_to_file(results, output_file, excel_file, text_file):
+    """Write analysis results for specific issue types to output file"""
     
     with open(output_file, 'w', encoding='utf-8') as file:
         file.write("="*80 + "\n")
-        file.write("           REPEATED TEXT PATTERNS ANALYSIS REPORT\n")
+        file.write("    SPECIFIC ISSUE TYPE - EXCEL WORDS vs TEXT FILE ANALYSIS\n")
         file.write("="*80 + "\n\n")
         
-        # 1. Exact repeated lines
-        file.write("🔄 EXACT REPEATED LINES\n")
-        file.write("-" * 40 + "\n")
-        if patterns['exact_lines']:
-            for line, count in sorted(patterns['exact_lines'], key=lambda x: x[1], reverse=True):
-                file.write(f"Count: {count}\n")
-                file.write(f"Text: {line}\n")
-                file.write("-" * 40 + "\n")
-        else:
-            file.write("No exact repeated lines found.\n\n")
+        file.write(f"📊 ANALYSIS SUMMARY:\n")
+        file.write(f"Excel file: {excel_file}\n")
+        file.write(f"Text file: {text_file}\n")
+        file.write(f"Target issue types: {', '.join(results['target_issue_types'])}\n")
+        file.write(f"Filtered records: {results['filtered_records']}\n")
+        file.write(f"Total unique words in descriptions: {results['total_unique_words']}\n")
+        file.write(f"Words found in text file: {results['words_found_in_text']}\n\n")
         
-        # 2. Repeated word sequences
-        file.write("\n🔤 REPEATED WORD SEQUENCES\n")
-        file.write("-" * 40 + "\n")
-        if patterns['word_sequences']:
-            for sequence, count in sorted(patterns['word_sequences'], key=lambda x: x[1], reverse=True)[:20]:
-                file.write(f"Count: {count}\n")
-                file.write(f"Sequence: {sequence}\n")
-                file.write("-" * 40 + "\n")
-        else:
-            file.write("No repeated word sequences found.\n\n")
+        file.write("🏆 TOP 40 MATCHING WORDS WITH COUNTS:\n")
+        file.write("="*80 + "\n")
+        file.write(f"{'Rank':<6} {'Word':<20} {'Text Count':<12} {'Desc Count':<12} {'Issue Types'}\n")
+        file.write("-"*80 + "\n")
         
-        # 3. Repeated phrases
-        file.write("\n📝 REPEATED PHRASES/PATTERNS\n")
-        file.write("-" * 40 + "\n")
-        if patterns['phrases']:
-            for phrase, count in sorted(patterns['phrases'], key=lambda x: x[1], reverse=True):
-                file.write(f"Count: {count}\n")
-                file.write(f"Phrase: {phrase}\n")
-                file.write("-" * 40 + "\n")
-        else:
-            file.write("No repeated phrases found.\n\n")
-        
-        # 4. Error patterns
-        file.write("\n⚠️ REPEATED ERROR PATTERNS\n")
-        file.write("-" * 40 + "\n")
-        if patterns['error_patterns']:
-            for error, count in sorted(patterns['error_patterns'], key=lambda x: x[1], reverse=True):
-                file.write(f"Count: {count}\n")
-                file.write(f"Error: {error}\n")
-                file.write("-" * 40 + "\n")
-        else:
-            file.write("No repeated error patterns found.\n\n")
-        
-        # 5. Partial matches
-        file.write("\n🔍 SIMILAR LINES (Partial Matches)\n")
-        file.write("-" * 40 + "\n")
-        if patterns['partial_matches']:
-            for key, matches in list(patterns['partial_matches'].items())[:10]:
-                file.write(f"Similar group (showing first few):\n")
-                for line1, line2, similarity in matches[:3]:
-                    file.write(f"Similarity: {similarity:.2%}\n")
-                    file.write(f"Line 1: {line1}\n")
-                    file.write(f"Line 2: {line2}\n")
-                    file.write("-" * 20 + "\n")
-                file.write("-" * 40 + "\n")
-        else:
-            file.write("No similar lines found.\n\n")
+        for rank, (word, data) in enumerate(results['top_40_matches'], 1):
+            issue_types_str = ', '.join(data['issue_types'])
+            
+            file.write(f"{rank:<6} {word:<20} {data['count_in_text']:<12} {data['count_in_descriptions']:<12} {issue_types_str}\n")
 
-def create_summary_report(patterns, summary_file):
-    """Create a summary report with statistics"""
+def get_available_issue_types(excel_file_path):
+    """Get list of all available issue types in the Excel file"""
     
-    with open(summary_file, 'w', encoding='utf-8') as file:
-        file.write("📊 REPEATED PATTERNS SUMMARY REPORT\n")
-        file.write("="*50 + "\n\n")
-        
-        file.write(f"🔄 Exact repeated lines: {len(patterns['exact_lines'])}\n")
-        file.write(f"🔤 Repeated word sequences: {len(patterns['word_sequences'])}\n")
-        file.write(f"📝 Repeated phrases: {len(patterns['phrases'])}\n")
-        file.write(f"⚠️ Repeated error patterns: {len(patterns['error_patterns'])}\n")
-        file.write(f"🔍 Similar line groups: {len(patterns['partial_matches'])}\n\n")
-        
-        # Top repeated items
-        if patterns['exact_lines']:
-            top_repeated = sorted(patterns['exact_lines'], key=lambda x: x[1], reverse=True)[:5]
-            file.write("🏆 TOP 5 MOST REPEATED LINES:\n")
-            for i, (line, count) in enumerate(top_repeated, 1):
-                file.write(f"{i}. ({count}x) {line[:100]}...\n")
+    try:
+        df = pd.read_excel(excel_file_path)
+        if 'issue_type' in df.columns:
+            unique_issue_types = df['issue_type'].dropna().unique().tolist()
+            return sorted(unique_issue_types)
+        else:
+            print("❌ 'issue_type' column not found in Excel file")
+            return []
+    except Exception as e:
+        print(f"❌ Error reading Excel file: {str(e)}")
+        return []
+
+def interactive_issue_type_selection(excel_file_path):
+    """Allow user to interactively select issue types"""
+    
+    available_types = get_available_issue_types(excel_file_path)
+    
+    if not available_types:
+        return []
+    
+    print("\n📋 Available Issue Types:")
+    print("=" * 40)
+    for i, issue_type in enumerate(available_types, 1):
+        print(f"{i:2d}. {issue_type}")
+    
+    print("\n🎯 Selection Options:")
+    print("- Enter numbers separated by commas (e.g., 1,3,5)")
+    print("- Enter 'all' to select all types")
+    print("- Enter issue type names directly (e.g., Network,System)")
+    
+    selection = input("\nEnter your selection: ").strip()
+    
+    if selection.lower() == 'all':
+        return available_types
+    
+    selected_types = []
+    
+    # Try to parse as numbers
+    try:
+        numbers = [int(x.strip()) for x in selection.split(',')]
+        for num in numbers:
+            if 1 <= num <= len(available_types):
+                selected_types.append(available_types[num - 1])
+            else:
+                print(f"⚠️ Warning: Invalid selection {num}")
+    except ValueError:
+        # Try to parse as issue type names
+        type_names = [x.strip() for x in selection.split(',')]
+        for name in type_names:
+            matching_types = [t for t in available_types if name.lower() in t.lower()]
+            if matching_types:
+                selected_types.extend(matching_types)
+            else:
+                print(f"⚠️ Warning: No match found for '{name}'")
+    
+    return list(set(selected_types))  # Remove duplicates
 
 # Main execution
 if __name__ == "__main__":
-    # File paths
-    input_file = "output_advanced_clean.txt"  # Output from previous script
-    output_file = "repeated_patterns_analysis.txt"
-    summary_file = "repeated_patterns_summary.txt"
+    # File paths - UPDATE THESE TO YOUR ACTUAL FILE PATHS
+    excel_file = "your_excel_file.xlsx"  # Change this to your Excel file path
+    text_file = "output_advanced_clean.txt"  # Or any text file you want to analyze
     
-    print("🔍 Starting repeated pattern analysis...")
-    print("=" * 60)
+    print("🚀 Starting Specific Issue Type Analysis...")
+    print("=" * 70)
     
-    # Check if input file exists
-    if not os.path.exists(input_file):
-        print(f"❌ Error: '{input_file}' not found!")
-        print("Make sure you've run the previous script first to generate the cleaned file.")
+    # Check if files exist
+    if not os.path.exists(excel_file):
+        print(f"❌ Error: Excel file '{excel_file}' not found!")
+        print("Please update the 'excel_file' variable with the correct path.")
         exit(1)
     
-    # Analyze repeated patterns
-    patterns = find_repeated_text_patterns(input_file, output_file, min_occurrences=2)
+    if not os.path.exists(text_file):
+        print(f"❌ Error: Text file '{text_file}' not found!")
+        print("Please update the 'text_file' variable with the correct path.")
+        exit(1)
     
-    if patterns:
-        # Create summary report
-        create_summary_report(patterns, summary_file)
-        print(f"📋 Summary report saved to: {summary_file}")
-        
-        print("\n" + "=" * 60)
-        print("🎉 Repeated pattern analysis complete!")
-        print(f"📄 Check '{output_file}' for detailed analysis")
-        print(f"📋 Check '{summary_file}' for quick summary")
+    # Method 1: Specify issue types directly in code
+    # Uncomment and modify the line below to specify issue types directly:
+    # target_issue_types = ["Network", "System", "Application"]  # Specify your target issue types here
+    
+    # Method 2: Interactive selection
+    target_issue_types = interactive_issue_type_selection(excel_file)
+    
+    if not target_issue_types:
+        print("❌ No issue types selected. Exiting...")
+        exit(1)
+    
+    print(f"\n✅ Selected issue types: {', '.join(target_issue_types)}")
+    
+    # Generate output filename based on selected types
+    safe_types = [t.replace(' ', '_').replace('/', '_') for t in target_issue_types]
+    output_file = f"analysis_{'_'.join(safe_types[:3])}.txt"  # Use first 3 types in filename
+    
+    # Run analysis
+    results = analyze_specific_issue_type(excel_file, text_file, target_issue_types, output_file)
+    
+    if results:
+        # Print summary
+        print("\n" + "=" * 70)
+        print("📈 QUICK SUMMARY:")
+        print(f"🎯 Issue types analyzed: {', '.join(target_issue_types)}")
+        print(f"📄 Records filtered: {results['filtered_records']}")
+        print(f"✅ Matching words found: {results['words_found_in_text']}")
+        if results['top_40_matches']:
+            print(f"🏆 Top word: '{results['top_40_matches'][0][0]}' with {results['top_40_matches'][0][1]['count_in_text']} matches")
+        print(f"\n🎉 Analysis complete! Results saved to: {output_file}")
