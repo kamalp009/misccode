@@ -1,176 +1,72 @@
-import pandas as pd
-from datetime import datetime
+import re
+import string
 
-def extract_and_create_new_excel(input_file_path, output_file_path=None, sheet_name=None):
+def extract_unique_words(input_file, output_file):
     """
-    Extract specific columns from an Excel file and create a new Excel file
+    Extract unique words from input file and write them to output file
     
-    Parameters:
-    input_file_path (str): Path to the input Excel file
-    output_file_path (str): Path for the new Excel file (optional)
-    sheet_name (str): Name of the sheet to read from (optional)
-    
-    Returns:
-    str: Path of the created Excel file
+    Args:
+        input_file (str): Path to the input text file
+        output_file (str): Path to the output text file
     """
     
     try:
-        # Read the original Excel file
-        if sheet_name:
-            df = pd.read_excel(input_file_path, sheet_name=sheet_name)
-        else:
-            df = pd.read_excel(input_file_path)
+        # Read the input file
+        with open(input_file, 'r', encoding='utf-8') as file:
+            text = file.read()
         
-        # Define the columns to extract
-        columns_to_extract = [
-            'Resolution [AF KCS Article]',  # Column X
-            'Number',                       # Column A
-            'Short description',            # Column G
-            'Category',                     # Column K
-            'Meta',                        # Column M
-            'URL',                         # Column O
-            'Cause',                       # Column R
-            'Issue',                       # Column V
-            'Resolution',                  # Column Y
-            'Use count',                   # Column AF
-            'View count'                   # Column AG
-        ]
+        # Convert to lowercase for case-insensitive comparison
+        text = text.lower()
         
-        # Check which columns exist
-        existing_columns = [col for col in columns_to_extract if col in df.columns]
+        # Remove punctuation and split into words
+        # Using regex to extract only alphabetic words
+        words = re.findall(r'\b[a-zA-Z]+\b', text)
         
-        if existing_columns:
-            # Extract the data
-            extracted_data = df[existing_columns].copy()
-            
-            # Generate output filename if not provided
-            if not output_file_path:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                output_file_path = f"extracted_data_{timestamp}.xlsx"
-            
-            # Create the new Excel file
-            with pd.ExcelWriter(output_file_path, engine='openpyxl') as writer:
-                extracted_data.to_excel(writer, sheet_name='Extracted_Data', index=False)
-                
-                # Optional: Add a summary sheet
-                summary_data = {
-                    'Metric': ['Total Rows', 'Total Columns', 'Extraction Date', 'Source File'],
-                    'Value': [
-                        len(extracted_data),
-                        len(extracted_data.columns),
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        input_file_path
-                    ]
-                }
-                summary_df = pd.DataFrame(summary_data)
-                summary_df.to_excel(writer, sheet_name='Summary', index=False)
-            
-            print(f"✅ Successfully created new Excel file: {output_file_path}")
-            print(f"📊 Extracted {len(extracted_data)} rows and {len(existing_columns)} columns")
-            print(f"📋 Columns included: {', '.join(existing_columns)}")
-            
-            return output_file_path
-            
-        else:
-            print("❌ No matching columns found in the source file.")
-            return None
-            
+        # Alternative method using string operations:
+        # translator = str.maketrans('', '', string.punctuation)
+        # text = text.translate(translator)
+        # words = text.split()
+        
+        # Get unique words using set
+        unique_words = set(words)
+        
+        # Sort the unique words alphabetically (optional)
+        unique_words_sorted = sorted(unique_words)
+        
+        # Write unique words to output file
+        with open(output_file, 'w', encoding='utf-8') as file:
+            for word in unique_words_sorted:
+                file.write(word + '\n')
+        
+        print(f"Successfully extracted {len(unique_words)} unique words")
+        print(f"Unique words saved to: {output_file}")
+        
     except FileNotFoundError:
-        print(f"❌ Error: Input file '{input_file_path}' not found.")
-        return None
+        print(f"Error: Input file '{input_file}' not found")
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        return None
+        print(f"An error occurred: {e}")
 
-def create_formatted_excel(input_file_path, output_file_path=None):
-    """
-    Create a new Excel file with formatting and styling
-    """
-    from openpyxl import load_workbook
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+def main():
+    # Specify input and output file paths
+    input_file = "input.txt"  # Change this to your input file path
+    output_file = "unique_words.txt"  # Change this to your desired output file path
     
-    # First extract the data
-    temp_file = extract_and_create_new_excel(input_file_path, "temp_extracted.xlsx")
+    # Call the function
+    extract_unique_words(input_file, output_file)
     
-    if temp_file:
-        # Generate final output filename
-        if not output_file_path:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_file_path = f"formatted_extracted_data_{timestamp}.xlsx"
-        
-        # Load the temporary file and apply formatting
-        wb = load_workbook("temp_extracted.xlsx")
-        ws = wb['Extracted_Data']
-        
-        # Header formatting
-        header_font = Font(bold=True, color="FFFFFF")
-        header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
-        header_alignment = Alignment(horizontal="center", vertical="center")
-        
-        # Apply header formatting
-        for cell in ws[1]:
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = header_alignment
-        
-        # Auto-adjust column widths
-        for column in ws.columns:
-            max_length = 0
-            column_letter = column[0].column_letter
+    # Optional: Display some statistics
+    try:
+        with open(output_file, 'r', encoding='utf-8') as file:
+            unique_words = file.read().strip().split('\n')
+            print(f"\nFirst 10 unique words:")
+            for i, word in enumerate(unique_words[:10], 1):
+                print(f"{i}. {word}")
             
-            for cell in column:
-                try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except:
-                    pass
-            
-            adjusted_width = min(max_length + 2, 50)  # Cap at 50 characters
-            ws.column_dimensions[column_letter].width = adjusted_width
-        
-        # Add borders
-        thin_border = Border(
-            left=Side(style='thin'),
-            right=Side(style='thin'),
-            top=Side(style='thin'),
-            bottom=Side(style='thin')
-        )
-        
-        for row in ws.iter_rows():
-            for cell in row:
-                cell.border = thin_border
-        
-        # Save the formatted file
-        wb.save(output_file_path)
-        
-        # Clean up temporary file
-        import os
-        os.remove("temp_extracted.xlsx")
-        
-        print(f"✨ Formatted Excel file created: {output_file_path}")
-        return output_file_path
+            if len(unique_words) > 10:
+                print(f"... and {len(unique_words) - 10} more words")
+                
+    except FileNotFoundError:
+        pass
 
-# Main execution
 if __name__ == "__main__":
-    # Replace with your input Excel file path
-    input_excel_file = "your_excel_file.xlsx"
-    
-    # Option 1: Create a basic new Excel file
-    print("Creating basic Excel file...")
-    basic_output = extract_and_create_new_excel(
-        input_file_path=input_excel_file,
-        output_file_path="extracted_columns_basic.xlsx"
-    )
-    
-    # Option 2: Create a formatted Excel file
-    print("\nCreating formatted Excel file...")
-    formatted_output = create_formatted_excel(
-        input_file_path=input_excel_file,
-        output_file_path="extracted_columns_formatted.xlsx"
-    )
-    
-    if basic_output:
-        print(f"\n📁 Files created successfully!")
-        print(f"Basic file: {basic_output}")
-        if formatted_output:
-            print(f"Formatted file: {formatted_output}")
+    main()
